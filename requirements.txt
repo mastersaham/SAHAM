@@ -5,3 +5,5 @@ yfinance
 plotly
 requests
 streamlit-autorefresh
+supabase
+midtransclient
