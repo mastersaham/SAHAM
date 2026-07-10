@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+yfinance
+plotly
+requests
+streamlit-autorefresh
+streamlit-cookies-manager
+supabase
+midtransclient
