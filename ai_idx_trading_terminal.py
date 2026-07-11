@@ -776,6 +776,13 @@ st.markdown("""
         color: #a9a7c4;
         margin-top: 2px;
     }
+    .stock-fund-inline {
+        font-size: 15px;
+        font-weight: 500;
+        color: #d9d7ec;
+        margin-left: 10px;
+        vertical-align: middle;
+    }
     .pulse-dot {
         height: 9px; width: 9px; border-radius: 50%;
         background: #ffb35a; display: inline-block; margin-right: 6px;
@@ -871,11 +878,6 @@ st.markdown("""
         border-bottom: 1px solid rgba(255,255,255,0.05);
         color: #f3f2ef;
     }
-    .portfolio-row-nonsyariah td {
-        border-left: 3px solid #ff5252;
-    }
-    .portfolio-row-nonsyariah td:first-child { border-left: 3px solid #ff5252; }
-
     .broker-chip {
         display: inline-block;
         padding: 2px 8px;
@@ -1495,13 +1497,25 @@ with st.container(key="header_status_bar"):
     else:
         _profile_label = f"❌ {display_name}"
 
+    # PERBAIKAN: st.popover bawaan Streamlit TIDAK otomatis nutup diri
+    # sendiri kalau tombol DI DALAMNYA diklik lalu trigger st.rerun() --
+    # popover-nya kebuka lagi setelah rerun karena widget key-nya sama
+    # persis. Solusinya: kasih popover ini "key" yang berubah tiap kali
+    # ada aksi di dalamnya (Kelola Pelanggan/Privasi Akun/Logout) --
+    # Streamlit jadi menganggapnya widget baru (state awal = tertutup),
+    # jadi begitu opsi diklik, popover otomatis ketutup sendiri.
+    if "profile_popover_seed" not in st.session_state:
+        st.session_state["profile_popover_seed"] = 0
+    _popover_key = f"profile_popover_{st.session_state['profile_popover_seed']}"
+
     with col_status:
-        with st.popover(_profile_label, use_container_width=True):
+        with st.popover(_profile_label, use_container_width=True, key=_popover_key):
             if status == "owner":
                 st.success("👑 Owner access granted")
                 st.divider()
                 if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
                     st.session_state["show_customer_panel"] = True
+                    st.session_state["profile_popover_seed"] += 1
                     st.rerun()
             elif status == "active":
                 st.success("✅ Subscription aktif")
@@ -1524,8 +1538,10 @@ with st.container(key="header_status_bar"):
             st.divider()
             if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
                 st.session_state.active_panel = "privacy"
+                st.session_state["profile_popover_seed"] += 1
                 st.rerun()
             if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                st.session_state["profile_popover_seed"] += 1
                 st.session_state.pop("auth_identifier", None)
                 st.session_state.pop("auth_display_name", None)
                 clear_login_cookie()
@@ -1868,6 +1884,11 @@ def render_html_table(df):
         st.info("Tidak ada data.")
         return
 
+    # Kolom-kolom persentase naik/turun -- diwarnai ijo/merah konsisten
+    # dengan .gain-up/.gain-down yang sudah dipakai di Portofolio, Top
+    # Gainer/Loser, dan tabel histori harga saham.
+    PCT_GAIN_LOSS_COLS = {"change_pct", "week_change_pct"}
+
     df_fmt = df.copy()
     for col in df_fmt.columns:
         if df_fmt[col].dtype == bool:
@@ -1888,6 +1909,10 @@ def render_html_table(df):
                 cells += f'<td>{score_badge(row[col])}</td>'
             elif col == "signal":
                 cells += f'<td>{signal_badge(row[col])}</td>'
+            elif col in PCT_GAIN_LOSS_COLS and pd.notna(row[col]):
+                _v = row[col]
+                _cls = "gain-up" if _v >= 0 else "gain-down"
+                cells += f'<td><span class="{_cls}">{_v:+.2f}%</span></td>'
             else:
                 cells += f"<td>{row[col]}</td>"
         # Lencana buat 3 peringkat teratas (tabel sudah terurut dari skor
@@ -2364,20 +2389,23 @@ def build_full_scan():
 
 
 # ============================================================
-#  HEADER
+#  HEADER — search bar cari saham
 # ============================================================
-st.markdown("""
-<div class="terminal-header">
-    <div>
-        <div class="terminal-title">🚀📈 RITEL SYARIAH</div>
-        <div class="terminal-sub"><span class="pulse-dot"></span>Live screener • ISSI watchlist</div>
-    </div>
-    <div class="terminal-sub">Bukan rekomendasi finansial</div>
-</div>
-""", unsafe_allow_html=True)
+with st.form("dashboard_search_form", clear_on_submit=False):
+    _search_col1, _search_col2 = st.columns([6, 1])
+    with _search_col1:
+        _search_query = st.text_input(
+            "Cari saham",
+            placeholder="Cari kode saham, mis. BBCA",
+            label_visibility="collapsed",
+            key="dashboard_stock_search",
+        )
+    with _search_col2:
+        _search_submitted = st.form_submit_button("🔍", use_container_width=True)
 
-_src_label = "🟢 Live dari IDX" if _issi_live else "🟡 Fallback list (IDX tidak terjangkau)"
-st.caption(f"ISSI watchlist: {len(ISSI_STOCKS)} saham • {_src_label}")
+if _search_submitted and _search_query.strip():
+    st.query_params["stock"] = _search_query.strip().upper()
+    st.rerun()
 
 # ---- State awal ----
 if "scan_df" not in st.session_state:
@@ -2867,16 +2895,30 @@ def render_stock_detail_page(ticker_raw):
         if not match.empty:
             scan_row = match.iloc[0]
 
-    sub_bits = []
+    # Fundamental diambil di sini (di-cache 6 jam, lihat get_stock_fundamentals)
+    # supaya sektor/industrinya bisa langsung tampil di sebelah kode saham,
+    # sekaligus dipakai ulang lagi nanti di section "Info Fundamental" di
+    # bawah tanpa perlu fetch dua kali.
+    with st.spinner("Mengambil info fundamental..."):
+        fundamentals = get_stock_fundamentals(ticker_jk)
+    _fund_bits = [b for b in [fundamentals.get("sektor"), fundamentals.get("industri")] if b]
+    fund_inline = " • ".join(_fund_bits) if _fund_bits else "Info fundamental tidak tersedia"
+
+    sub_line = "Belum ada di hasil scan terakhir"
     if scan_row is not None:
-        sub_bits.append(f"Harga terakhir: {scan_row['price']}")
-    sub_line = " • ".join(sub_bits) if sub_bits else "Belum ada di hasil scan terakhir"
+        _chg = scan_row.get("change_pct")
+        if _chg is not None and pd.notna(_chg):
+            _chg_cls = "gain-up" if _chg >= 0 else "gain-down"
+            _chg_html = f' <span class="{_chg_cls}">({_chg:+.2f}%)</span>'
+        else:
+            _chg_html = ""
+        sub_line = f"Harga terakhir: {scan_row['price']}{_chg_html}"
     badge_html = signal_badge(scan_row["signal"]) if scan_row is not None else ""
     st.markdown(
         f"""
         <div class="terminal-header">
             <div>
-                <div class="terminal-title">📈 {ticker_no_jk}</div>
+                <div class="terminal-title">{ticker_no_jk} <span class="stock-fund-inline">{fund_inline}</span></div>
                 <div class="terminal-sub">{sub_line}</div>
             </div>
             <div>{badge_html}</div>
@@ -3067,11 +3109,10 @@ def render_stock_detail_page(ticker_raw):
                 unsafe_allow_html=True,
             )
 
-    # ---- Fundamental ----
+    # ---- Fundamental (detail lengkap; ringkasan sektor/industri sudah
+    # ditampilkan di sebelah kode saham di atas, `fundamentals` di sini
+    # pakai hasil yang sama, sudah di-cache jadi tidak fetch dua kali) ----
     st.subheader("🏢 Info Fundamental")
-    with st.spinner("Mengambil info fundamental..."):
-        fundamentals = get_stock_fundamentals(ticker_jk)
-
     fcols = st.columns(3)
     fcols[0].metric("Sektor", fundamentals["sektor"] or "Data tidak tersedia")
     fcols[1].metric("Industri", fundamentals["industri"] or "Data tidak tersedia")
@@ -3218,7 +3259,7 @@ def render_top_panel():
 
     df_scan_preview = st.session_state.scan_df
     if df_scan_preview is not None and not df_scan_preview.empty:
-        st.markdown("#### 📈 Top Gainer / 📉 Top Loser (dalam watchlist)")
+        st.markdown("#### 📈 Top Gainer / 📉 Top Loser")
         ranked = df_scan_preview.sort_values("change_pct", ascending=False)
         # PERBAIKAN: tampung sampai 50 saham per panel (bukan cuma 3), tapi
         # dibungkus container scroll biar tinggi UI tetap cuma ~5 baris kelihatan.
@@ -3404,6 +3445,19 @@ else:
         df_scan = ensure_scanned()
         st.subheader("📊 Hasil Scan Penuh")
         df_display = df_scan.copy()
+        # PERBAIKAN: urutan kolom dipaksa eksplisit di sini -- data hasil
+        # scan disimpan sebagai jsonb di Supabase, dan Postgres TIDAK
+        # menjaga urutan key asli tiap kali disimpan (bisa teracak beda
+        # tiap kali worker nulis ulang), jadi kalau dibiarkan ikut urutan
+        # dari database, kolom "stock" bisa nongol di tengah-tengah tabel.
+        _scan_col_order = [
+            "stock", "price", "change_pct", "week_change_pct", "score",
+            "signal", "trend", "entry", "tp", "sl", "swing", "drop",
+            "bandar", "fake_breakout",
+        ]
+        _cols_present = [c for c in _scan_col_order if c in df_display.columns]
+        _cols_leftover = [c for c in df_display.columns if c not in _cols_present]
+        df_display = df_display[_cols_present + _cols_leftover]
         df_display["stock"] = df_display["stock"].apply(_display_ticker)
         render_html_table(df_display)
         if not df_scan.empty:
