@@ -7,13 +7,15 @@ import hashlib
 import secrets as secrets_lib
 import requests
 import time
+import gc
+import numpy as np
 import xml.etree.ElementTree as ET
 import pandas as pd
 import yfinance as yf
-import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+from datetime import time as dtime_cls
 from streamlit_cookies_manager import EncryptedCookieManager
 from supabase import create_client
 
@@ -24,8 +26,8 @@ from community_feed import render_community_feed
 from notifications import render_notification_bell
 
 st.set_page_config(
-    page_title="AI IDX Trading Terminal",
-    page_icon="🔥",
+    page_title="RITEL SYARIAH",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -381,7 +383,7 @@ def send_reset_password_email(to_email, to_username, reset_link):
     """
     api_key = st.secrets.get("BREVO_API_KEY", "")
     sender_email = st.secrets.get("BREVO_SENDER_EMAIL", "")
-    sender_name = st.secrets.get("BREVO_SENDER_NAME", "AI IDX Trading Terminal")
+    sender_name = st.secrets.get("BREVO_SENDER_NAME", "RITEL SYARIAH")
 
     if not api_key or not sender_email:
         return False, "BREVO_API_KEY / BREVO_SENDER_EMAIL belum diisi di Streamlit Secrets."
@@ -390,7 +392,7 @@ def send_reset_password_email(to_email, to_username, reset_link):
     payload = {
         "sender": {"name": sender_name, "email": sender_email},
         "to": [{"email": to_email, "name": to_username}],
-        "subject": "Reset Password — AI IDX Trading Terminal",
+        "subject": "Reset Password — RITEL SYARIAH",
         "htmlContent": (
             '<div style="font-family:sans-serif;font-size:15px;color:#222;">'
             f"<p>Halo <b>{safe_username}</b>,</p>"
@@ -476,7 +478,7 @@ NEGATIVE_KEYWORDS = [
 ]
 
 
-@st.cache_data(ttl=55, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)  # PERBAIKAN: 55d -> 15m, samain cadence & shared ke semua user
 def fetch_stock_news(ticker, query, max_items=5):
     params = {"q": query, "hl": "id", "gl": "ID", "ceid": "ID:id"}
     headers = {"User-Agent": "Mozilla/5.0 (compatible; AITradingTerminal/1.0)"}
@@ -534,10 +536,9 @@ def get_all_stock_news(stock_queries, max_items_per_stock=5):
     """Ambil berita untuk tiap saham di stock_queries, tandai sentimennya,
     lalu gabungkan semua dan urutkan dari yang paling baru.
 
-    CATATAN PERBAIKAN: sebelumnya stock_queries di-hardcode ke 3 saham
-    (ADRO/BRIS/TLKM) meskipun scanner sudah mencakup ~600 saham ISSI.
-    Sekarang dipanggil dengan daftar dinamis (top saham hasil scan),
-    lihat tombol "📰 NEWS" di bawah.
+    Dipanggil dengan daftar dinamis: gabungan saham portofolio user (yang
+    syariah) + top saham hasil scan. Lihat render_news_section() di bawah,
+    tab "📈 Saham".
     """
     all_news = []
     for ticker, query in stock_queries.items():
@@ -548,6 +549,47 @@ def get_all_stock_news(stock_queries, max_items_per_stock=5):
             all_news.append({
                 **article,
                 "matched_stocks": [ticker],
+                "sentiment": sentiment,
+                "sentiment_emoji": emoji,
+            })
+    all_news.sort(key=lambda a: parse_pub_date(a["pub_date"]), reverse=True)
+    return all_news
+
+
+# Kata kunci untuk tab "🌐 Umum" -- berita ekonomi/kebijakan Indonesia yang
+# berpotensi menggerakkan IHSG secara luas (bukan spesifik satu saham).
+# Pidato/kebijakan Presiden Prabowo dipantau khusus karena sering jadi
+# pemicu sentimen pasar.
+GENERAL_NEWS_QUERIES = [
+    "IHSG",
+    "Prabowo ekonomi",
+    "Prabowo pidato",
+    "kebijakan ekonomi Indonesia",
+    "Bank Indonesia suku bunga",
+    "rupiah",
+]
+
+
+@st.cache_data(ttl=900, show_spinner=False)  # PERBAIKAN: 55d -> 15m, samain cadence & shared ke semua user
+def get_general_market_news(max_items_per_query=5):
+    """Ambil berita ekonomi/IHSG umum (tidak terikat saham tertentu) dari
+    beberapa kata kunci di GENERAL_NEWS_QUERIES, gabungkan, buang duplikat
+    (link sama muncul dari >1 kata kunci), urutkan dari yang paling baru."""
+    all_news = []
+    seen_links = set()
+    for query in GENERAL_NEWS_QUERIES:
+        articles = fetch_stock_news(query, query, max_items_per_query)
+        for article in articles:
+            link = article.get("link", "")
+            if link and link in seen_links:
+                continue
+            if link:
+                seen_links.add(link)
+            combined_text = f"{article['title']} {article['description']}"
+            sentiment, emoji = analyze_sentiment(combined_text)
+            all_news.append({
+                **article,
+                "matched_stocks": [],
                 "sentiment": sentiment,
                 "sentiment_emoji": emoji,
             })
@@ -588,6 +630,8 @@ st.markdown("""
     --------------------------------------------------------- */
     .scan-table-wrap {
         overflow-x: auto;
+        overflow-y: auto;
+        max-height: 460px;
         border-radius: 12px;
         border: 1px solid rgba(255,255,255,0.08);
         margin-bottom: 14px;
@@ -599,13 +643,16 @@ st.markdown("""
         white-space: nowrap;
     }
     .scan-table thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
         text-transform: uppercase;
         text-align: center;
         font-size: 13px;
         font-weight: 700;
         letter-spacing: 0.6px;
         color: #ffb35a;
-        background: rgba(255,179,90,0.12);
+        background: #0f1020;
         padding: 12px 14px;
         border-bottom: 1px solid rgba(255,179,90,0.28);
     }
@@ -802,6 +849,8 @@ st.markdown("""
     }
 
     .badge-buy { background: rgba(0,224,140,0.15); color: #00e08c; }
+    .badge-hold { background: rgba(255,152,0,0.15); color: #ff9800; }
+    .badge-neutral { background: rgba(255,193,7,0.15); color: #ffc107; }
     .badge-wait { background: rgba(255,193,7,0.15); color: #ffc107; }
     .badge-sell { background: rgba(255,82,82,0.15); color: #ff5252; }
     .badge-nonsyariah { background: rgba(255,82,82,0.15); color: #ff5252; }
@@ -1048,12 +1097,12 @@ st.markdown("""
 st.markdown("""
 <div class="orange-topbar">
     <div class="orange-topbar-badge">
-        <span class="orange-topbar-badge-dot"></span> AI IDX Terminal
+        <span class="orange-topbar-badge-dot"></span> RITEL SYARIAH
     </div>
     <div class="orange-topbar-title">
-        🚀 AI IDX Trading Terminal <span class="orange-topbar-pro-chip">PRO</span>
+        🚀📈 RITEL SYARIAH <span class="orange-topbar-pro-chip">PRO</span>
     </div>
-    <div class="orange-topbar-sub">Khusus saham syariah — semoga berkah &amp; cuan 🌙</div>
+    <div class="orange-topbar-sub">Khusus saham syariah, semoga berkah</div>
     <div class="orange-topbar-divider"></div>
 </div>
 """, unsafe_allow_html=True)
@@ -1073,6 +1122,72 @@ def get_user_status(identifier, user_db):
     if username in OWNER_USERNAMES:
         return "owner"
     return user_db.get(identifier, {}).get("status", "inactive")
+
+
+# ============================================================
+#  LANGGANAN — durasi paket, aktivasi/perpanjangan, & info tampilan
+# ============================================================
+# Durasi per paket (hari). Sesuaikan di sini kalau nanti ada paket baru
+# atau durasinya berubah -- semua tempat lain (webhook Stripe, panel
+# aktivasi manual Owner, popover status) otomatis ikut.
+PLAN_DURATIONS = {
+    "bulanan": 30,
+    "3_bulanan": 90,
+    "tahunan": 365,
+}
+PLAN_LABELS = {
+    "bulanan": "Bulanan",
+    "3_bulanan": "3 Bulanan",
+    "tahunan": "Tahunan",
+}
+
+_BULAN_ID = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+
+def format_tanggal_id(dt):
+    """Format datetime jadi '12 Jul 2026' (tanpa perlu setting locale OS)."""
+    return f"{dt.day} {_BULAN_ID[dt.month - 1]} {dt.year}"
+
+
+def activate_subscription(user_db, identifier, plan):
+    """Aktifkan/perpanjang langganan user (dipanggil dari webhook Stripe
+    ATAU dari panel aktivasi manual Owner). Sesuai keputusan: setiap kali
+    ini dipanggil (= setiap kali user bayar), status jadi aktif, tanggal
+    MULAI = saat ini juga (waktu pembayaran/aktivasi terjadi), dan tanggal
+    BERAKHIR = mulai + durasi paket yang dipilih. Tidak ada logika 'sisa
+    hari lama ditambahkan' -- simpel sesuai permintaan awal, gampang
+    diubah nanti kalau perlu."""
+    if plan not in PLAN_DURATIONS:
+        plan = "bulanan"
+    now = datetime.now()
+    record = user_db.setdefault(identifier, {})
+    record["status"] = "active"
+    record["plan"] = plan
+    record["subscribed_at"] = now.isoformat()
+    record["expires_at"] = (now + timedelta(days=PLAN_DURATIONS[plan])).isoformat()
+    save_user_db(user_db)
+    return record
+
+
+def get_subscription_info(identifier, user_db):
+    """Return dict {plan, subscribed_at, expires_at, days_left} kalau user
+    ini punya data langganan (pernah diaktifkan), None kalau belum pernah
+    (misal owner, atau akun baru daftar yang belum pernah bayar)."""
+    record = user_db.get(identifier, {})
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return None
+    try:
+        expires_dt = datetime.fromisoformat(expires_at)
+    except (ValueError, TypeError):
+        return None
+    days_left = (expires_dt.date() - datetime.now().date()).days
+    return {
+        "plan": record.get("plan"),
+        "subscribed_at": record.get("subscribed_at"),
+        "expires_at": expires_at,
+        "days_left": days_left,
+    }
 
 
 # ============================================================
@@ -1365,17 +1480,72 @@ supabase_client = get_supabase_client()
 
 with st.container(key="header_status_bar"):
     if status in ("owner", "active") and supabase_client:
-        col_status, col_notif, col_portfolio, col_logout = st.columns([3.6, 0.6, 1.3, 1])
+        col_status, col_notif, col_portfolio = st.columns([3.6, 0.6, 1.3])
     else:
-        col_status, col_portfolio, col_logout = st.columns([4, 1.3, 1])
+        col_status, col_portfolio = st.columns([4, 1.3])
         col_notif = None
+
+    # ---- Nama profil = trigger dropdown (popover) berisi Privasi Akun
+    # & Logout, biar gak makan tempat sebagai tombol terpisah-pisah di
+    # header. Label tombolnya sendiri sudah nunjukkin status + nama. ----
+    if status == "owner":
+        _profile_label = f"👑 {display_name}"
+    elif status == "active":
+        _profile_label = f"✅ {display_name}"
+    else:
+        _profile_label = f"❌ {display_name}"
+
     with col_status:
-        if status == "owner":
-            st.success(f"👑 Owner access granted — {display_name}")
-        elif status == "active":
-            st.success(f"✅ Subscription aktif — {display_name}")
-        else:
-            st.warning(f"❌ Belum berlangganan — {display_name}")
+        with st.popover(_profile_label, use_container_width=True):
+            if status == "owner":
+                st.success("👑 Owner access granted")
+                st.divider()
+                if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
+                    st.session_state["show_customer_panel"] = True
+                    st.rerun()
+            elif status == "active":
+                st.success("✅ Subscription aktif")
+                _sub_info = get_subscription_info(identifier, user_db)
+                if _sub_info and _sub_info.get("subscribed_at") and _sub_info.get("expires_at"):
+                    try:
+                        _mulai_dt = datetime.fromisoformat(_sub_info["subscribed_at"])
+                        _akhir_dt = datetime.fromisoformat(_sub_info["expires_at"])
+                        _plan_label = PLAN_LABELS.get(_sub_info["plan"], _sub_info["plan"] or "-")
+                        st.caption(
+                            f"Paket **{_plan_label}**  \n"
+                            f"Mulai: {format_tanggal_id(_mulai_dt)}  \n"
+                            f"Berakhir: {format_tanggal_id(_akhir_dt)} "
+                            f"(sisa {_sub_info['days_left']} hari)"
+                        )
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                st.warning("❌ Belum berlangganan")
+            st.divider()
+            if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
+                st.session_state.active_panel = "privacy"
+                st.rerun()
+            if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                st.session_state.pop("auth_identifier", None)
+                st.session_state.pop("auth_display_name", None)
+                clear_login_cookie()
+                # Cegah cookie lama (yang mungkin belum sempat kehapus di
+                # browser saat rerun ini terjadi) auto-login-in kita lagi.
+                st.session_state["skip_cookie_restore"] = True
+                # PERBAIKAN (bug "harus klik 2x"): EncryptedCookieManager
+                # menghapus cookie lewat komponen JS yang butuh 1 kali
+                # pulang-pergi komunikasi browser<->server. Kalau
+                # st.rerun() dipanggil PERSIS sesudah clear_login_cookie(),
+                # rerun itu sering kejadian SEBELUM instruksi hapus cookie
+                # beneran sampai & disinkronkan ke browser -- jadi klik
+                # pertama kelihatan "gak ngefek", baru klik kedua yang
+                # kerasa. Jeda singkat ini kasih waktu component itu
+                # menyelesaikan pulang-pergi tadi sebelum halaman di-render
+                # ulang, jadi 1x klik langsung keluar.
+                with st.spinner("Logout..."):
+                    time.sleep(0.35)
+                st.rerun()
+
     if col_notif is not None:
         with col_notif:
             render_notification_bell(supabase_client, user_id=identifier)
@@ -1384,15 +1554,18 @@ with st.container(key="header_status_bar"):
             if st.button("📌 Portofolio Saya", use_container_width=True):
                 st.session_state["show_portfolio"] = True
                 st.rerun()
-    with col_logout:
-        if st.button("Logout", use_container_width=True):
-            st.session_state.pop("auth_identifier", None)
-            st.session_state.pop("auth_display_name", None)
-            clear_login_cookie()
-            # Cegah cookie lama (yang mungkin belum sempat kehapus di
-            # browser saat rerun ini terjadi) auto-login-in kita lagi.
-            st.session_state["skip_cookie_restore"] = True
-            st.rerun()
+
+# ---- Banner soft: sisa masa aktif <=3 hari ----
+# Sengaja diletakkan di sini (segera setelah header, SEBELUM percabangan
+# show_portfolio/show_customer_panel/active_panel manapun), supaya tampil
+# terus menerus di halaman apapun yang lagi dibuka, bukan cuma di dashboard,
+# dan tanpa perlu diklik/dibuka dulu (beda dari popover yang perlu diklik).
+if status == "active":
+    _sub_info_banner = get_subscription_info(identifier, user_db)
+    if _sub_info_banner and 0 <= _sub_info_banner["days_left"] <= 3:
+        _sisa = _sub_info_banner["days_left"]
+        _sisa_txt = "hari ini" if _sisa == 0 else f"{_sisa} hari lagi"
+        st.info(f"⏳ Masa aktif langganan kamu tinggal {_sisa_txt}. Yuk perpanjang biar akses gak terputus.")
 
 if status not in ("owner", "active"):
     st.stop()
@@ -1416,23 +1589,15 @@ if status not in ("owner", "active"):
 # ~15 menit, jadi auto-refresh disamakan jadi 15 menit (bukan 30-60 detik lagi)
 # — dikombinasikan dengan batch-download di get_all_data() di bawah, refresh
 # jadi jauh lebih cepat dan tidak lagi kerasa lama.
-REFRESH_OPTIONS = {"Otomatis (15 menit)": 900, "Manual (off)": 0}
-
-with st.sidebar:
-    st.markdown("### ⚙️ Pengaturan")
-    refresh_label = st.radio("Interval auto-refresh", list(REFRESH_OPTIONS.keys()), index=0)
-    refresh_seconds = REFRESH_OPTIONS[refresh_label]
-    st.caption(
-        "Auto-refresh 15 menit cuma berlaku buat panel Top Gainer / Top Loser "
-        "(mengikuti jadwal update data pusat), jalan diam-diam di background "
-        "tanpa mengganggu bagian lain. Bagian bawah (Scan Market, Bandar "
-        "Detector, dst) tetap manual — klik ulang tombolnya atau "
-        "'Refresh Now' kalau mau data terbaru."
-    )
-    # PERBAIKAN: waktu mode "Manual (off)" dipilih, tidak ada cara lain untuk
-    # memicu re-scan (sebelumnya bug: data jadi stuck selamanya di mode manual
-    # karena ensure_scanned() hanya jalan sekali). Tombol ini forces re-scan.
-    manual_refresh_clicked = st.button("🔄 Refresh Now", use_container_width=True)
+#
+# CATATAN: tidak ada lagi kontrol auto-refresh/refresh manual di sidebar.
+# Data sudah diperbarui otomatis di belakang layar oleh sistem pusat
+# (scan_worker.py -> Supabase) tiap ~15 menit; user tinggal pakai data itu
+# tanpa perlu ngatur atau memicu refresh sendiri. Panel Top Gainer/Loser
+# tetap baca ulang data terbaru tiap 15 menit lewat st.fragment (diam-diam,
+# tanpa UI/countdown).
+REFRESH_SECONDS = 900
+manual_refresh_clicked = False
 
 # ============================================================
 #  DATA + INDIKATOR TEKNIKAL
@@ -1445,30 +1610,49 @@ with st.sidebar:
 # sekaligus secara paralel di background), jauh lebih cepat.
 @st.cache_data(ttl=60, show_spinner=False)
 def get_all_data(stocks_tuple):
+    """Download data semua saham, TAPI dibagi jadi kelompok kecil (batch)
+    biar RAM tidak numpuk sekaligus -- sebelumnya semua ~600 saham
+    di-download dalam satu panggilan yf.download, ini bikin memori
+    server melonjak drastis dan proses mati (segmentation fault) di
+    Streamlit Cloud (jatah RAM terbatas). Sekarang diproses per-batch,
+    dan hasil mentah tiap batch langsung dibuang dari memori (gc.collect)
+    sebelum lanjut ke batch berikutnya."""
     stocks = list(stocks_tuple)
-    raw = yf.download(
-        stocks,
-        period="3mo",
-        interval="1d",
-        progress=False,
-        group_by="ticker",
-        threads=True,
-        auto_adjust=True,
-    )
+    BATCH_SIZE = 60
     data = {}
-    for stock in stocks:
+
+    for i in range(0, len(stocks), BATCH_SIZE):
+        batch = stocks[i:i + BATCH_SIZE]
         try:
-            if len(stocks) == 1:
-                df = raw
-            else:
-                df = raw[stock]
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df = df.dropna(subset=["Close", "Open", "High", "Low", "Volume"])
-            if len(df) >= 30:
-                data[stock] = df
+            raw = yf.download(
+                batch,
+                period="3mo",
+                interval="1d",
+                progress=False,
+                group_by="ticker",
+                threads=True,
+                auto_adjust=True,
+            )
         except Exception:
             continue
+
+        for stock in batch:
+            try:
+                if len(batch) == 1:
+                    df = raw
+                else:
+                    df = raw[stock]
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.dropna(subset=["Close", "Open", "High", "Low", "Volume"])
+                if len(df) >= 30:
+                    data[stock] = df
+            except Exception:
+                continue
+
+        del raw
+        gc.collect()
+
     return data
 
 
@@ -1484,11 +1668,14 @@ def support_resistance(df):
 
 
 def trend_strength(df):
-    ma20 = df['Close'].rolling(20).mean()
-    ma50 = df['Close'].rolling(50).mean()
-    if ma20.iloc[-1] > ma50.iloc[-1]:
+    """UPGRADE: sebelumnya pakai SMA20 vs SMA50 (rata-rata biasa), sekarang
+    EMA20 vs EMA50 (Exponential Moving Average) -- lebih responsif ke
+    perubahan harga terbaru, sesuai indikator 'EMA 20/50' yang diminta."""
+    ema20 = calc_ema(df, 20)
+    ema50 = calc_ema(df, 50)
+    if ema20.iloc[-1] > ema50.iloc[-1]:
         return "Bullish Strong"
-    elif ma20.iloc[-1] < ma50.iloc[-1]:
+    elif ema20.iloc[-1] < ema50.iloc[-1]:
         return "Bearish"
     else:
         return "Sideways"
@@ -1553,17 +1740,98 @@ def get_quick_quote(ticker_jk):
 
 
 def scoring(df, support, resistance):
+    """Scoring gabungan, total maksimal 100. Sekarang menggabungkan
+    kriteria klasik (support/breakout/volume/trend EMA) DENGAN indikator
+    teknikal tambahan: RSI, MACD, ADX, Bollinger Bands, VWAP, Fibonacci.
+
+    Tiap kriteria kasih poin KALAU kepenuhi. Kalau datanya belum cukup
+    buat 1 indikator tertentu (saham baru listing, histori pendek) atau
+    kriterianya gak kepenuhi, poinnya 0 -- TIDAK dipaksa kasih poin biar
+    skor 'kelihatan bagus'. Bobot per kriteria (total 100):
+      - Harga dekat support        : 10
+      - Breakout valid              : 15
+      - Volume spike                : 10
+      - Trend EMA20>EMA50 (bullish) : 15
+      - RSI momentum bullish        : 10
+      - MACD bullish crossover      : 10
+      - ADX tren kuat + arah naik   : 10
+      - Bollinger Bands posisi      : 10
+      - VWAP (harga > VWAP rolling) : 5
+      - Fibonacci dekat support kuat: 5
+    """
     score = 0
     price = df['Close'].iloc[-1]
+
+    # ---- Kriteria klasik ----
     if price <= support * 1.05:
-        score += 25
+        score += 10
     if breakout_valid(df, resistance):
-        score += 30
+        score += 15
     if volume_spike(df):
-        score += 20
+        score += 10
     if "Bullish" in trend_strength(df):
-        score += 25
-    return score
+        score += 15
+
+    # ---- RSI: momentum bullish sehat (bukan overbought), atau oversold
+    # (potensi rebound, poin lebih kecil karena bukan sinyal sekuat momentum) ----
+    try:
+        rsi_val = calc_rsi(df).iloc[-1]
+        if 50 < rsi_val <= 70:
+            score += 10
+        elif rsi_val < 30:
+            score += 5
+    except Exception:
+        pass
+
+    # ---- MACD: garis MACD di atas garis sinyal DAN histogram positif ----
+    try:
+        macd_line, signal_line, hist = calc_macd(df)
+        if macd_line.iloc[-1] > signal_line.iloc[-1] and hist.iloc[-1] > 0:
+            score += 10
+    except Exception:
+        pass
+
+    # ---- ADX: tren KUAT (>=25) dan arahnya naik (+DI > -DI) ----
+    try:
+        adx_val, plus_di, minus_di = calc_adx(df)
+        if adx_val.iloc[-1] >= 25 and plus_di.iloc[-1] > minus_di.iloc[-1]:
+            score += 10
+    except Exception:
+        pass
+
+    # ---- Bollinger Bands: breakout upper band (momentum kuat) ATAU
+    # baru mantul dari lower band (potensi rebound, poin lebih kecil) ----
+    try:
+        bb_upper, bb_mid, bb_lower = calc_bollinger(df)
+        if price >= bb_upper.iloc[-1]:
+            score += 10
+        elif price <= bb_lower.iloc[-1] * 1.02:
+            score += 5
+    except Exception:
+        pass
+
+    # ---- VWAP rolling: harga di atas VWAP = bias beli lebih dominan ----
+    try:
+        vwap_val = calc_vwap_rolling(df).iloc[-1]
+        if pd.notna(vwap_val) and price > vwap_val:
+            score += 5
+    except Exception:
+        pass
+
+    # ---- Fibonacci: harga lagi persis di level support kuat (0.5/0.618),
+    # toleransi 1.5% dari harga sekarang ----
+    try:
+        fib = calc_fibonacci_levels(df)
+        if fib:
+            for lvl_key in ("0.5", "0.618"):
+                lvl_price = fib[lvl_key]
+                if lvl_price > 0 and abs(price - lvl_price) / price <= 0.015:
+                    score += 5
+                    break
+    except Exception:
+        pass
+
+    return min(score, 100)
 
 
 def signal(score):
@@ -1572,9 +1840,24 @@ def signal(score):
     elif score >= 50:
         return "BUY"
     elif score >= 30:
-        return "WAIT"
+        return "HOLD"
     else:
         return "SELL"
+
+
+def score_badge(score):
+    """Tampilkan angka score dengan warna gradasi: makin rendah makin
+    merah, naik ke oranye/kuning di tengah, makin tinggi makin hijau.
+    Pakai HSL supaya transisinya halus (bukan cuma 3 warna patah-patah)."""
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return str(score)
+    s_clamped = max(0.0, min(100.0, s))
+    hue = s_clamped * 1.2  # 0 = merah, ~60 = kuning/oranye, 120 = hijau
+    color = f"hsl({hue:.0f}, 75%, 50%)"
+    display_val = int(s) if float(s).is_integer() else s
+    return f'<span style="color:{color}; font-weight:700;">{display_val}</span>'
 
 
 def render_html_table(df):
@@ -1601,6 +1884,10 @@ def render_html_table(df):
                 # Nama saham diklik -> pindah ke halaman detail saham itu
                 # (lihat render_stock_detail_page), lewat query param URL.
                 cells += f'<td><a class="stock-link" href="?stock={row[col]}">{row[col]}</a></td>'
+            elif col == "score":
+                cells += f'<td>{score_badge(row[col])}</td>'
+            elif col == "signal":
+                cells += f'<td>{signal_badge(row[col])}</td>'
             else:
                 cells += f"<td>{row[col]}</td>"
         # Lencana buat 3 peringkat teratas (tabel sudah terurut dari skor
@@ -1623,8 +1910,8 @@ def render_html_table(df):
 def signal_badge(sig):
     if "BUY" in sig:
         cls = "badge-buy"
-    elif "WAIT" in sig:
-        cls = "badge-wait"
+    elif "HOLD" in sig:
+        cls = "badge-hold"
     else:
         cls = "badge-sell"
     return f'<span class="badge {cls}">{sig}</span>'
@@ -1650,6 +1937,127 @@ def bandar_detection(df):
 
 def fake_breakout_detector(df, resistance):
     return df['Close'].iloc[-2] > resistance and df['Close'].iloc[-1] < resistance
+
+
+# ============================================================
+#  INDIKATOR TEKNIKAL TAMBAHAN — RSI, MACD, EMA, ATR, ADX,
+#  Bollinger Bands, VWAP, Auto-Fibonacci.
+#  Semua dipakai sebagai KOMPONEN SCORING (lihat scoring()), bukan
+#  kolom tabel baru -- tujuannya scoring makin akurat/kuat, sesuai
+#  indikator yang sudah jadi standar di produk sejenis.
+# ============================================================
+def calc_ema(df, span):
+    """Exponential Moving Average -- lebih responsif ke harga terbaru
+    dibanding SMA biasa, karena bobot data baru lebih besar."""
+    return df['Close'].ewm(span=span, adjust=False).mean()
+
+
+def calc_rsi(df, period=14):
+    """RSI (Relative Strength Index) 0-100. Wilder's smoothing (standar
+    baku RSI, bukan simple moving average biasa). >70 = overbought,
+    <30 = oversold. Kalau data belum cukup / avg_loss = 0, netral (50)
+    -- BUKAN dipaksa jadi sinyal kuat."""
+    delta = df['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi_val = 100 - (100 / (1 + rs))
+    return rsi_val.fillna(50)
+
+
+def calc_macd(df, fast=12, slow=26, signal=9):
+    """MACD standar (EMA12 - EMA26), garis sinyal EMA9 dari MACD line,
+    dan histogram (MACD - sinyal). Return 3 Series: macd_line, signal_line, hist."""
+    ema_fast = df['Close'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df['Close'].ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def calc_atr(df, period=14):
+    """Average True Range (Wilder) -- ukuran volatilitas harian, dipakai
+    scoring lain (bukan berdiri sendiri) buat menimbang seberapa 'wajar'
+    breakout/volume spike terjadi relatif ke volatilitas normal saham itu."""
+    high, low, close = df['High'], df['Low'], df['Close']
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
+def calc_adx(df, period=14):
+    """ADX (Average Directional Index) + DI/-DI (Wilder). ADX >= 25 =
+    tren sedang kuat (naik ATAU turun -- makanya WAJIB dicek bareng
+    +DI vs -DI buat tau arahnya). Return (adx, plus_di, minus_di)."""
+    high, low, close = df['High'], df['Low'], df['Close']
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    atr_val = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (
+        plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        / atr_val.replace(0, np.nan)
+    )
+    minus_di = 100 * (
+        minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        / atr_val.replace(0, np.nan)
+    )
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx_val = dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    return adx_val.fillna(0), plus_di.fillna(0), minus_di.fillna(0)
+
+
+def calc_bollinger(df, period=20, num_std=2):
+    """Bollinger Bands standar: SMA20 di tengah, ±2 standar deviasi.
+    Return (upper, mid, lower)."""
+    mid = df['Close'].rolling(period).mean()
+    std = df['Close'].rolling(period).std()
+    upper = mid + num_std * std
+    lower = mid - num_std * std
+    return upper, mid, lower
+
+
+def calc_vwap_rolling(df, period=20):
+    """PENDEKATAN, bukan VWAP intraday asli -- VWAP asli reset tiap hari
+    dari data per-menit yang TIDAK tersedia dari yfinance interval
+    harian (sama seperti keterbatasan yang dibahas soal BSJP). Ini
+    'VWAP rolling N hari' dari data harian: total(harga tipikal x volume)
+    / total(volume) selama N hari terakhir -- dipakai sebagai proxy level
+    harga rata-rata tertimbang volume, bukan VWAP harian yang presisi."""
+    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    pv = typical_price * df['Volume']
+    return pv.rolling(period).sum() / df['Volume'].rolling(period).sum()
+
+
+def calc_fibonacci_levels(df, lookback=60):
+    """Level Fibonacci retracement otomatis dari swing high & swing low
+    N hari terakhir. Return dict {level: harga}, atau {} kalau data
+    kurang / swing high=low (gak ada range buat dihitung)."""
+    window = df.tail(lookback)
+    swing_high = window['High'].max()
+    swing_low = window['Low'].min()
+    diff = swing_high - swing_low
+    if diff <= 0:
+        return {}
+    return {
+        "0.0": swing_high,
+        "0.236": swing_high - 0.236 * diff,
+        "0.382": swing_high - 0.382 * diff,
+        "0.5": swing_high - 0.5 * diff,
+        "0.618": swing_high - 0.618 * diff,
+        "0.786": swing_high - 0.786 * diff,
+        "1.0": swing_low,
+    }
 
 
 # ============================================================
@@ -1818,7 +2226,7 @@ def _render_broker_summary_panel():
     st.markdown(
         f'<div class="update-strip">'
         f'<span>🕒 Data Broker untuk: <b>{broker_date.strftime("%d %B %Y")}</b> '
-        f'pukul <b>16:00 WIB</b> (closing/EOD, sumber: GOAPI.IO)</span>'
+        f'pukul <b>16:00 WIB</b> (closing/EOD)</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -1838,13 +2246,15 @@ def _render_broker_summary_panel():
     broker_err = st.session_state.get("broker_err")
 
     if broker_err:
-        st.error(broker_err)
-        st.caption(
-            "Cek: (1) GOAPI_API_KEY sudah diisi di Secrets, (2) endpoint/"
-            "header di fetch_broker_summary() sudah cocok dengan dokumentasi "
-            "resmi di dashboard GOAPI kamu (goapi.io/docs), (3) kuota API "
-            "gratis belum habis."
-        )
+        st.error("Data broker sedang tidak bisa diambil, coba lagi sebentar lagi.")
+        if status == "owner":
+            st.caption(
+                f"[Owner] Detail error: {broker_err} — cek: (1) GOAPI_API_KEY "
+                "sudah diisi di Secrets, (2) endpoint/header di "
+                "fetch_broker_summary() sudah cocok dengan dokumentasi resmi "
+                "di dashboard GOAPI kamu (goapi.io/docs), (3) kuota API "
+                "gratis belum habis."
+            )
     elif df_broker.empty:
         st.info(
             f"Belum ada data broker untuk {_display_ticker(broker_symbol)} "
@@ -1908,6 +2318,12 @@ def send_telegram(msg):
         return False
 
 
+
+# CATATAN: build_full_scan() di bawah ini SUDAH TIDAK DIPANGGIL di mana
+# pun lagi. App sekarang TIDAK PERNAH scan sendiri -- selalu baca hasil
+# scan terpusat dari Supabase (lihat _load_central_scan / ensure_scanned
+# di atas). Fungsi ini dibiarkan ada (bukan dihapus) sebagai referensi
+# logika scan, kalau-kalau suatu saat dibutuhkan lagi.
 def build_full_scan():
     """Jalan sekali, hitung semua metrik untuk semua saham. Disimpan di
     session_state supaya tiap action button bisa slice/filter tanpa
@@ -1953,10 +2369,10 @@ def build_full_scan():
 st.markdown("""
 <div class="terminal-header">
     <div>
-        <div class="terminal-title">🔥 AI IDX TRADING TERMINAL</div>
+        <div class="terminal-title">🚀📈 RITEL SYARIAH</div>
         <div class="terminal-sub"><span class="pulse-dot"></span>Live screener • ISSI watchlist</div>
     </div>
-    <div class="terminal-sub">Data: Yahoo Finance • Bukan rekomendasi finansial</div>
+    <div class="terminal-sub">Bukan rekomendasi finansial</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1972,14 +2388,71 @@ if "last_updated_epoch" not in st.session_state:
     st.session_state.last_updated_epoch = None
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_central_scan():
+    """Baca hasil scan yang sudah disiapkan 'petugas scan' (scan_worker.py,
+    dijalankan berkala lewat GitHub Actions) dari Supabase -- BUKAN scan
+    sendiri. Ini yang bikin app cepat dibuka biarpun banyak user
+    bersamaan, karena tidak ada yang download+hitung data saham sendiri
+    tiap buka app. Return (DataFrame, waktu_update) atau (None, None)
+    kalau data pusat belum ada / gagal diambil.
+
+    PERBAIKAN (skala 1000+ user): dibungkus @st.cache_data(ttl=900) --
+    cache ini DIBAGI ke SEMUA user di server yang sama (bukan per-session
+    seperti st.session_state). Jadi walau ribuan user klik apapun
+    bersamaan, cuma ADA MAKSIMAL 1 request nyata ke Supabase tiap 15
+    menit (disamakan dengan cadence scan_worker.py) -- user lainnya
+    otomatis dapat data dari cache RAM server, nyaris instan, tanpa
+    network call sendiri-sendiri."""
+    if not supabase_client:
+        return None, None
+    try:
+        res = supabase_client.table("scan_results").select("*").eq("id", 1).execute()
+        rows = res.data or []
+        if not rows:
+            return None, None
+        records = rows[0].get("data") or []
+        if not records:
+            return None, None
+        df = pd.DataFrame(records)
+        updated_dt = None
+        updated_raw = rows[0].get("updated_at")
+        if updated_raw:
+            try:
+                updated_dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                updated_dt = (updated_dt + timedelta(hours=7)).replace(tzinfo=None)
+            except Exception:
+                updated_dt = None
+        return df, updated_dt
+    except Exception:
+        return None, None
+
+
 def ensure_scanned(force=False):
-    """Dipakai oleh tombol aksi di bagian bawah — HANYA baca cache yang
-    sudah ada, tidak pernah memicu fetch baru sendiri (biar bagian bawah
-    tetap manual)."""
-    if force or st.session_state.scan_df is None:
-        st.session_state.scan_df = build_full_scan()
-        st.session_state.last_updated = datetime.now()
-        st.session_state.last_updated_epoch = time.time()
+    """Dipakai oleh tombol aksi & panel atas. App TIDAK PERNAH scan
+    sendiri lagi -- cukup baca hasil scan TERPUSAT dari Supabase (diisi
+    scan_worker.py tiap 15 menit lewat GitHub Actions, HANYA jam bursa).
+    Kalau data pusat kosong total (baru pertama kali setup, belum pernah
+    ada scan sukses sekalipun), df yang dikembalikan kosong -- banner di
+    render_top_panel() yang menjelaskan situasinya ke user, BUKAN dengan
+    scan langsung (biar app tetap ringan buat semua orang).
+
+    PERBAIKAN (skala 1000+ user): sekarang SELALU panggil
+    _load_central_scan() langsung -- tidak lagi menyimpan salinan manual
+    di st.session_state per-user. Karena _load_central_scan() sendiri
+    sudah di-cache (ttl=900, dibagi ke semua user), pemanggilan ini
+    nyaris gratis (baca cache RAM) kecuali cache-nya baru saja expired.
+    Efeknya: Scan / Portofolio / Top Gainer-Loser semua otomatis baca
+    sumber data yang SAMA & SINKRON, dan otomatis "ter-update" begitu
+    cache di-refresh oleh siapapun user yang kebetulan jadi pemicu
+    pertama setelah 15 menit -- tanpa perlu tombol refresh manual.
+    `force` dipertahankan untuk kompatibilitas tapi sekarang tidak
+    berefek berbeda, karena tidak ada lagi cache manual di session_state
+    yang perlu "dipaksa" dilewati."""
+    df_central, updated_dt = _load_central_scan()
+    st.session_state.scan_df = df_central if df_central is not None else pd.DataFrame()
+    st.session_state.last_updated = updated_dt
+    st.session_state.last_updated_epoch = time.time()
     return st.session_state.scan_df
 
 
@@ -2034,7 +2507,7 @@ def render_portfolio_page(user_db, identifier, display_name):
             if match is not None and not match.empty:
                 r = match.iloc[0]
                 price = f"{r['price']:,.0f}"
-                score_txt = str(r["score"])
+                score_txt = score_badge(r["score"])
                 daily = r["change_pct"]
                 weekly = r.get("week_change_pct", None)
                 weekly_txt = f"{weekly:+.2f}%" if weekly is not None else "–"
@@ -2047,7 +2520,7 @@ def render_portfolio_page(user_db, identifier, display_name):
                 price, daily_cls, weekly_txt, weekly_cls = "–", "", "–", ""
                 daily = None
                 score_txt = "–"
-                sig_html = '<span class="badge badge-wait">DATA BELUM ADA</span>'
+                sig_html = '<span class="badge badge-neutral">DATA BELUM ADA</span>'
                 bandar_txt = "–"
                 row_cls = ""
         else:
@@ -2069,9 +2542,9 @@ def render_portfolio_page(user_db, identifier, display_name):
             f'<tr class="{row_cls}">'
             f'<td><a class="stock-link" href="?stock={ticker_jk}"><b>{code}</b></a></td>'
             f'<td>{price}</td>'
-            f'<td>{score_txt}</td>'
             f'<td class="{daily_cls}">{daily_txt}</td>'
             f'<td class="{weekly_cls}">{weekly_txt}</td>'
+            f'<td>{score_txt}</td>'
             f'<td>{sig_html}</td>'
             f'<td>{bandar_txt}</td>'
             f'</tr>'
@@ -2081,7 +2554,7 @@ def render_portfolio_page(user_db, identifier, display_name):
     <div class="portfolio-table-wrap">
       <table class="portfolio-table">
         <thead><tr>
-          <th>KODE</th><th>HARGA</th><th>SCORE</th><th>%HARI INI</th><th>%MINGGU INI</th>
+          <th>KODE</th><th>HARGA</th><th>%HARI INI</th><th>%MINGGU INI</th><th>SCORE</th>
           <th>STATUS</th><th>BANDAR</th>
         </tr></thead>
         <tbody>{''.join(rows_html)}</tbody>
@@ -2105,6 +2578,111 @@ def render_portfolio_page(user_db, identifier, display_name):
 if st.session_state.get("show_portfolio"):
     render_portfolio_page(user_db, identifier, display_name)
     st.stop()
+
+
+def render_customer_panel(user_db):
+    """Halaman khusus Owner (dibuka lewat tombol 'Kelola Pelanggan' di
+    popover nama akun): daftar SEMUA pelanggan beserta status/paket/tanggal
+    langganan masing-masing, plus form aktivasi/perpanjangan manual --
+    dipakai selama Stripe belum live / untuk koreksi manual selagi app
+    belum dibuka ke umum."""
+    st.markdown("### 🗂️ Kelola Pelanggan")
+    if st.button("← Kembali ke Dashboard", key="back_from_customer_panel"):
+        st.session_state["show_customer_panel"] = False
+        st.rerun()
+
+    st.markdown("##### Aktivasi / Perpanjang Manual")
+    semua_username = sorted(
+        k[len("user:"):] for k in user_db.keys()
+        if k.startswith("user:") and k[len("user:"):] not in OWNER_USERNAMES
+    )
+    if not semua_username:
+        st.info("Belum ada akun pelanggan yang terdaftar.")
+    else:
+        with st.form("form_activate_customer", clear_on_submit=False):
+            col_u, col_p, col_btn = st.columns([2, 2, 1])
+            with col_u:
+                target_username = st.selectbox("Pilih user", semua_username)
+            with col_p:
+                target_plan = st.selectbox(
+                    "Pilih paket",
+                    list(PLAN_DURATIONS.keys()),
+                    format_func=lambda p: PLAN_LABELS.get(p, p),
+                )
+            with col_btn:
+                st.markdown("<br>", unsafe_allow_html=True)
+                submit_activate = st.form_submit_button("✅ Aktifkan", use_container_width=True)
+
+        if submit_activate:
+            activate_subscription(user_db, f"user:{target_username}", target_plan)
+            st.success(
+                f"Langganan {target_username} diaktifkan -- paket {PLAN_LABELS.get(target_plan, target_plan)}."
+            )
+            st.rerun()
+
+    st.divider()
+    st.markdown("##### Semua Pelanggan")
+
+    rows_html = []
+    total_active = 0
+    for key in sorted(user_db.keys()):
+        if not key.startswith("user:"):
+            continue
+        uname = key[len("user:"):]
+        if uname in OWNER_USERNAMES:
+            continue
+        record = user_db.get(key, {})
+        rec_status = record.get("status", "inactive")
+        if rec_status == "active":
+            total_active += 1
+        sub_info = get_subscription_info(key, user_db)
+        if sub_info and sub_info.get("subscribed_at") and sub_info.get("expires_at"):
+            try:
+                mulai_dt = datetime.fromisoformat(sub_info["subscribed_at"])
+                akhir_dt = datetime.fromisoformat(sub_info["expires_at"])
+                plan_label = PLAN_LABELS.get(sub_info["plan"], sub_info["plan"] or "-")
+                mulai_txt = format_tanggal_id(mulai_dt)
+                akhir_txt = format_tanggal_id(akhir_dt)
+                sisa_txt = f"{sub_info['days_left']} hari"
+            except (ValueError, TypeError):
+                plan_label, mulai_txt, akhir_txt, sisa_txt = "-", "-", "-", "-"
+        else:
+            plan_label, mulai_txt, akhir_txt, sisa_txt = "-", "-", "-", "-"
+
+        status_html = (
+            '<span class="badge badge-buy">Aktif</span>'
+            if rec_status == "active"
+            else '<span class="badge badge-sell">Belum/Nonaktif</span>'
+        )
+
+        rows_html.append(
+            f"<tr><td>{uname}</td><td>{record.get('email', '-')}</td>"
+            f"<td>{status_html}</td><td>{plan_label}</td>"
+            f"<td>{mulai_txt}</td><td>{akhir_txt}</td><td>{sisa_txt}</td></tr>"
+        )
+
+    st.caption(f"Total pelanggan aktif: **{total_active}** dari {len(rows_html)} akun terdaftar.")
+
+    table_html = f"""
+    <div class="portfolio-table-wrap">
+      <table class="portfolio-table">
+        <thead><tr>
+          <th>USERNAME</th><th>EMAIL</th><th>STATUS</th><th>PAKET</th>
+          <th>MULAI</th><th>BERAKHIR</th><th>SISA</th>
+        </tr></thead>
+        <tbody>{''.join(rows_html) if rows_html else '<tr><td colspan="7">Belum ada pelanggan.</td></tr>'}</tbody>
+      </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+if st.session_state.get("show_customer_panel"):
+    if status != "owner":
+        st.session_state["show_customer_panel"] = False
+    else:
+        render_customer_panel(user_db)
+        st.stop()
 
 
 # ============================================================
@@ -2432,7 +3010,7 @@ def render_stock_detail_page(ticker_raw):
             broker_note = (
                 "Top 5 broker (3 hari bursa terakhir saja)"
                 if _goapi_configured_for_detail
-                else "Top 5 broker perlu GOAPI_API_KEY di Secrets"
+                else "Data top 5 broker belum tersedia untuk saham ini"
             )
             st.markdown(
                 f"""
@@ -2505,10 +3083,9 @@ def render_stock_detail_page(ticker_raw):
 
     if not _goapi_configured_for_detail:
         st.caption(
-            "📡 Sumber data saat ini: Yahoo Finance (gratis). Data fundamental "
-            "saham IDX di Yahoo Finance sering tidak lengkap — begitu kamu "
-            "langganan GOAPI dan isi GOAPI_API_KEY di Secrets (lalu isi logic "
-            "fetch-nya), semua field di atas otomatis terbuka lengkap."
+            "📡 Sebagian data fundamental saham ini mungkin belum lengkap. "
+            "Data akan otomatis lebih lengkap begitu sumber data premium "
+            "diaktifkan."
         )
 
     # ---- Ringkasan sinyal dari hasil scan terakhir ----
@@ -2575,72 +3152,69 @@ if _stock_param:
 # ============================================================
 #  TOP GAINERS / TOP LOSERS — FRAGMENT TERPISAH
 # ============================================================
-# PERBAIKAN UTAMA (biar gak "burem"/nunggu lama): panel ini dibungkus
-# st.fragment(run_every=...). Streamlit akan me-refresh KHUSUS fragment ini
-# sendirian di background sesuai jadwal (15 menit), tanpa rerun/freeze
-# seluruh halaman. Hasil di bagian bawah (Scan Market, dst) sama sekali
-# tidak kesentuh saat fragment ini refresh — tetap kelihatan & bisa
-# dipakai seperti biasa. Ditambah get_all_data() yang sekarang batch +
-# paralel, refresh jadi berlangsung dalam hitungan detik, bukan menit.
-@st.fragment(run_every=refresh_seconds if refresh_seconds > 0 else None)
+# PERBAIKAN (bug lama): sebelumnya @st.fragment(run_every=...) salah
+# nempel di _is_market_hours() (cuma fungsi cek jam bursa, tidak
+# me-render apapun) -- bukan di render_top_panel() yang benar-benar
+# menggambar panel & narik data. Efeknya panel ini TIDAK PERNAH benar-
+# benar auto-refresh sendiri di background seperti niatnya.
+#
+# PERBAIKAN (skala 1000+ user): sekarang dekorator dipindah ke
+# render_top_panel() yang sebenarnya, DAN fungsi ini sudah tidak lagi
+# fetch berat langsung -- cukup panggil ensure_scanned() yang di baliknya
+# baca _load_central_scan() ber-cache (ttl=900, dibagi semua user). Jadi
+# walau fragment ini jalan tiap 15 menit di ribuan tab user bersamaan,
+# hampir semuanya cuma baca cache RAM (murah) -- cuma 1 dari mereka yang
+# kebetulan "kena" saat cache expired yang benar-benar fetch ke Supabase.
+def _is_market_hours(now_dt):
+    """Senin-Jumat, 09:00-16:15 (asumsi waktu server = WIB, konsisten
+    dengan konvensi yang sudah dipakai di last_trading_date())."""
+    if now_dt.weekday() >= 5:  # Sabtu(5) / Minggu(6)
+        return False
+    t = now_dt.time()
+    return dtime_cls(9, 0) <= t <= dtime_cls(16, 15)
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
 def render_top_panel():
-    need_refresh = (
-        manual_refresh_clicked
-        or st.session_state.scan_df is None
-        or (
-            refresh_seconds > 0
-            and st.session_state.last_updated_epoch is not None
-            and (time.time() - st.session_state.last_updated_epoch) >= refresh_seconds
-        )
-    )
-    if need_refresh:
-        with st.spinner("Memperbarui Top Gainer/Loser..."):
-            st.session_state.scan_df = build_full_scan()
-            st.session_state.last_updated = datetime.now()
-            st.session_state.last_updated_epoch = time.time()
+    # TIDAK PERNAH scan sendiri di sini -- ensure_scanned() cuma baca
+    # cache bersama (_load_central_scan, ttl=900). Kalau data pusat
+    # kosong, df yang balik kosong -- ditangani di banner status di
+    # bawah (bukan dengan scan langsung, biar app tetap ringan).
+    ensure_scanned()
 
-    last_upd_str = (
-        st.session_state.last_updated.strftime("%H:%M:%S")
-        if st.session_state.last_updated else "-"
-    )
-    st.markdown(
-        f'<div class="update-strip">'
-        f'<span>🕒 Update terakhir: <b>{last_upd_str}</b> WIB (server)</span>'
-        f'<span>Auto-refresh: <b>{refresh_label}</b></span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    # ---- Banner status kesegaran data (dilihat SEMUA user) ----
+    is_owner_view = status == "owner"
+    updated_dt = st.session_state.last_updated
+    now_dt = datetime.now()
 
-    # ---- Countdown mundur ke auto-refresh berikutnya. Dijalankan murni di
-    # sisi browser (JS setInterval) supaya tidak perlu rerun Streamlit tiap
-    # detik hanya buat update angka countdown. ----
-    if refresh_seconds > 0 and st.session_state.last_updated_epoch:
-        _target_ms = int((st.session_state.last_updated_epoch + refresh_seconds) * 1000)
-        components.html(
-            f"""
-            <div style="font-family: inherit; font-size:13px; color:#a9a7c4;
-                         margin: -10px 0 16px 4px;">
-                ⏳ Refresh Top Gainer/Loser berikutnya dalam
-                <b id="cd-timer" style="color:#f3f2ef;">--:--</b>
-            </div>
-            <script>
-            (function() {{
-                const target = {_target_ms};
-                const el = document.getElementById('cd-timer');
-                function tick() {{
-                    const now = Date.now();
-                    let diff = Math.max(0, Math.floor((target - now) / 1000));
-                    const m = String(Math.floor(diff / 60)).padStart(2, '0');
-                    const s = String(diff % 60).padStart(2, '0');
-                    if (el) {{ el.textContent = m + ':' + s; }}
-                }}
-                tick();
-                setInterval(tick, 1000);
-            }})();
-            </script>
-            """,
-            height=30,
-        )
+    if updated_dt is None:
+        st.info("📊 Sedang menyiapkan data, mohon tunggu beberapa menit.")
+        if is_owner_view:
+            st.caption(
+                "⚠️ [Owner] Belum pernah ada scan yang berhasil sama sekali — "
+                "cek tab **Actions** di GitHub (\"Scan Saham Terpusat\" → Run workflow)."
+            )
+    else:
+        last_upd_str = updated_dt.strftime("%H:%M, %d %b %Y")
+        market_open = _is_market_hours(now_dt)
+        stale = (now_dt - updated_dt) > timedelta(minutes=30)
+
+        if market_open and stale:
+            if is_owner_view:
+                st.warning(
+                    f"⚠️ [Owner] Data belum diperbarui >30 menit (terakhir: "
+                    f"{last_upd_str} WIB) — cek GitHub Actions/petugas scan."
+                )
+            else:
+                st.warning(f"⏳ Data sedang diperbarui, mohon tunggu sebentar. (Terakhir: {last_upd_str} WIB)")
+        else:
+            label = "Update terakhir" if market_open else "Data terakhir saat bursa tutup"
+            st.markdown(
+                f'<div class="update-strip">'
+                f'<span>🕒 {label}: <b>{last_upd_str}</b> WIB</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     df_scan_preview = st.session_state.scan_df
     if df_scan_preview is not None and not df_scan_preview.empty:
@@ -2671,235 +3245,335 @@ def render_top_panel():
             st.markdown(_render_scroll_list(losers), unsafe_allow_html=True)
 
 
-render_top_panel()
-
-st.divider()
-
-
 # ============================================================
-#  ACTION BUTTONS ROW — tiap tombol = satu command
+#  NEWS SECTION — dipanggil dari dalam halaman dashboard saja (lihat
+#  blok NAVIGASI di bawah). Kalau ada panel yang
+#  lagi dibuka (Scan/Bandar/dst), otomatis nongol DI BAWAH panel itu
+#  (karena Python jalan top-to-bottom, pemanggilannya ditaruh setelah
+#  semua blok "if active_panel == ..."). Kalau tidak ada panel dibuka,
+#  otomatis nongol di bawah baris tombol aksi.
 # ============================================================
-# PERBAIKAN: panel yang lagi ditampilkan (Scan/Bandar/Breakout/dst) disimpan
-# di session_state supaya TIDAK hilang saat halaman rerun karena tick
-# auto-refresh 15 menit (yang cuma seharusnya memperbarui panel Top
-# Gainer/Loser di atas). Data yang ditampilkan tetap dari cache manual —
-# baru berubah kalau tombolnya diklik ulang, "Refresh Now" ditekan, atau
-# auto-refresh baru saja jalan (karena berbagi cache yang sama).
-if "active_panel" not in st.session_state:
-    st.session_state.active_panel = None
+def _build_stock_news_queries(df_scan, user_db, identifier, top_n=15):
+    """Gabungan ticker untuk tab 'Saham': saham portofolio user (KHUSUS
+    yang syariah/terdaftar ISSI) + top-N skor tertinggi hasil scan,
+    duplikat dibuang (portofolio didahulukan di urutan)."""
+    portfolio_codes = get_user_portfolio(user_db, identifier) if identifier else []
+    portfolio_tickers = [
+        f"{c}.JK" for c in portfolio_codes if f"{c}.JK" in ISSI_STOCKS
+    ]
+    top_tickers = []
+    if df_scan is not None and not df_scan.empty:
+        top_tickers = df_scan.head(top_n)["stock"].tolist()
+    combined = list(dict.fromkeys(portfolio_tickers + top_tickers))  # dedup, urutan dijaga
+    return combined, set(portfolio_tickers)
 
-c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
-with c1:
-    if st.button("🔍 SCAN MARKET"):
-        st.session_state.active_panel = "scan"
-with c2:
-    if st.button("🐋 BANDAR DETECTOR"):
-        st.session_state.active_panel = "bandar"
-with c3:
-    if st.button("🚀 BREAKOUT SCANNER"):
-        st.session_state.active_panel = "breakout"
-with c4:
-    if st.button("📉 SWING ALERT"):
-        st.session_state.active_panel = "swing"
-with c5:
-    if st.button("⚠️ FAKE BREAKOUT"):
-        st.session_state.active_panel = "fake"
-with c6:
-    btn_telegram = st.button("📲 SEND BEST TO TG")
-with c7:
-    if st.button("📰 NEWS"):
-        st.session_state.active_panel = "news"
-with c8:
-    if st.button("🏦 BROKER SUMMARY"):
-        st.session_state.active_panel = "broker"
-with c9:
-    if st.button("💬 KOMUNITAS"):
-        st.session_state.active_panel = "community"
 
-# ---- SCAN MARKET : tabel penuh, semua saham, semua metrik ----
-if st.session_state.active_panel == "scan":
-    df_scan = ensure_scanned()
-    st.subheader("📊 Hasil Scan Penuh")
-    df_display = df_scan.copy()
-    df_display["stock"] = df_display["stock"].apply(_display_ticker)
-    render_html_table(df_display)
-    if not df_scan.empty:
-        best = df_scan.iloc[0]
-        st.markdown(
-            f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
-            f'{signal_badge(best["signal"])} @ {best["price"]}</div>',
-            unsafe_allow_html=True,
-        )
-
-# ---- BANDAR DETECTOR : hanya saham dengan aktivitas bandar non-netral ----
-if st.session_state.active_panel == "bandar":
-    df_scan = ensure_scanned()
-    st.subheader("🐋 Deteksi Aktivitas Bandar")
-    bandar_hits = df_scan[df_scan["bandar"] != "NETRAL"]
-    if bandar_hits.empty:
-        st.info("Tidak ada aktivitas bandar signifikan hari ini.")
-    else:
-        for _, r in bandar_hits.iterrows():
-            st.markdown(
-                f'<div class="card"><b>{_display_ticker(r["stock"])}</b> — {r["bandar"]} '
-                f'(price: {r["price"]}) {signal_badge(r["signal"])}</div>',
-                unsafe_allow_html=True,
-            )
-
-# ---- BREAKOUT SCANNER : saham dengan breakout valid ----
-if st.session_state.active_panel == "breakout":
-    df_scan = ensure_scanned()
-    st.subheader("🚀 Saham Breakout Valid")
-    breakouts = df_scan[df_scan["score"] >= 50]
-    if breakouts.empty:
-        st.info("Belum ada breakout kuat terdeteksi.")
-    else:
-        df_display = breakouts[["stock", "price", "score", "signal", "entry", "tp", "sl"]].copy()
-        df_display["stock"] = df_display["stock"].apply(_display_ticker)
-        render_html_table(df_display)
-
-# ---- SWING ALERT : saham yang drop >25% dari swing high ----
-if st.session_state.active_panel == "swing":
-    df_scan = ensure_scanned()
-    st.subheader("📉 Swing Drop Alert (>25% dari high)")
-    swing_hits = df_scan[df_scan["swing"] == True]
-    if swing_hits.empty:
-        st.info("Tidak ada saham dengan swing drop signifikan.")
-    else:
-        df_display = swing_hits[["stock", "price", "drop", "trend", "signal"]].copy()
-        df_display["stock"] = df_display["stock"].apply(_display_ticker)
-        render_html_table(df_display)
-
-# ---- FAKE BREAKOUT : breakout yang baru saja gagal ----
-if st.session_state.active_panel == "fake":
-    df_scan = ensure_scanned()
-    st.subheader("⚠️ Fake Breakout Warning")
-    fake_hits = df_scan[df_scan["fake_breakout"] == True]
-    if fake_hits.empty:
-        st.info("Tidak ada fake breakout terdeteksi saat ini.")
-    else:
-        df_display = fake_hits[["stock", "price", "trend", "signal"]].copy()
-        df_display["stock"] = df_display["stock"].apply(_display_ticker)
-        render_html_table(df_display)
-
-# ---- SEND BEST TO TELEGRAM ----
-if btn_telegram:
-    df_scan = ensure_scanned()
-    if df_scan.empty:
-        st.warning("Belum ada data untuk dikirim.")
-    else:
-        best = df_scan.iloc[0]
-        msg = (
-            f"BEST PICK: {_display_ticker(best['stock'])}\n"
-            f"Signal: {best['signal']}\n"
-            f"Price: {best['price']}\n"
-            f"Entry: {best['entry']} | TP: {best['tp']} | SL: {best['sl']}"
-        )
-        ok = send_telegram(msg)
-        if ok:
-            st.success("Terkirim ke Telegram ✅")
-        else:
-            st.error("Gagal kirim ke Telegram — cek TELEGRAM_TOKEN / CHAT_ID di Secrets.")
-
-# ---- NEWS : berita real (Google News RSS) untuk top saham hasil scan ----
-# PERBAIKAN: sebelumnya query berita di-hardcode ke 3 saham (ADRO/BRIS/TLKM).
-# Sekarang otomatis ambil top-5 saham skor tertinggi dari hasil scan, jadi
-# selalu relevan dengan watchlist ~600 saham ISSI, bukan cuma 3 saham tetap.
-if st.session_state.active_panel == "news":
-    df_scan = ensure_scanned()
-    st.subheader("📰 Berita Saham Terkini")
-    if df_scan.empty:
-        st.info("Belum ada hasil scan untuk dicarikan beritanya.")
-    else:
-        top_tickers = df_scan.head(5)["stock"].tolist()
-        stock_news_queries = {
-            t: f"{t.replace('.JK', '')} saham" for t in top_tickers
-        }
-        with st.spinner("Mengambil berita terbaru..."):
-            news_items = get_all_stock_news(stock_news_queries)
-
-        if not news_items:
-            st.info(
-                "Belum ada berita terbaru untuk saham top watchlist kamu saat ini, "
-                "atau Google News sedang tidak bisa diakses."
-            )
-        else:
-            for news in news_items:
-                stocks_str = ", ".join(t.replace(".JK", "") for t in news["matched_stocks"])
-                with st.container(border=True):
-                    st.markdown(f"**{news['title']}**")
+def _render_news_cards(news_items, show_stock_tag):
+    """Render daftar berita sebagai card, dibungkus container tinggi tetap
+    (~10 berita kelihatan, sisanya bisa discroll)."""
+    with st.container(height=420):
+        for news in news_items:
+            with st.container(border=True):
+                st.markdown(f"**{news['title']}**")
+                if show_stock_tag and news["matched_stocks"]:
+                    stocks_str = ", ".join(t.replace(".JK", "") for t in news["matched_stocks"])
                     cols = st.columns([1, 1, 2])
                     cols[0].markdown(f"📈 Saham: `{stocks_str}`")
                     cols[1].markdown(f"{news['sentiment_emoji']} {news['sentiment']}")
-                    meta = " · ".join(x for x in [news["source"], news["pub_date"]] if x)
-                    if meta:
-                        cols[2].caption(meta)
-                    if news["description"]:
-                        st.caption(news["description"][:220] + ("..." if len(news["description"]) > 220 else ""))
-                    if news["link"]:
-                        st.markdown(f"[Baca selengkapnya]({news['link']})")
+                    meta_col = cols[2]
+                else:
+                    cols = st.columns([1, 3])
+                    cols[0].markdown(f"{news['sentiment_emoji']} {news['sentiment']}")
+                    meta_col = cols[1]
+                meta = " · ".join(x for x in [news["source"], news["pub_date"]] if x)
+                if meta:
+                    meta_col.caption(meta)
+                if news["description"]:
+                    st.caption(news["description"][:220] + ("..." if len(news["description"]) > 220 else ""))
+                if news["link"]:
+                    st.markdown(f"[Baca selengkapnya]({news['link']})")
 
-# ---- BROKER SUMMARY : kode broker + volume beli/jual per saham,
-# khusus data EOD (update setelah bursa tutup, via GOAPI.IO) ----
-if st.session_state.active_panel == "broker":
-    st.subheader("🏦 Broker Summary (Data EOD)")
 
-    _goapi_configured = bool(GOAPI_API_KEY) and GOAPI_API_KEY != "ISI_API_KEY_GOAPI_LO"
+# PERBAIKAN (skala 1000+ user): dibungkus fragment sendiri, terpisah dari
+# render_top_panel(), supaya berita bisa auto-refresh tiap 15 menit tanpa
+# ikut nge-render ulang panel Top Gainer/Loser (dan sebaliknya). Karena
+# fetch_stock_news() & get_general_market_news() di baliknya sudah
+# di-cache (ttl=900, dibagi semua user), rerun fragment ini tiap 15 menit
+# di ribuan tab sekaligus tetap murah -- hampir selalu baca cache RAM.
+@st.fragment(run_every=REFRESH_SECONDS)
+def render_news_section():
+    st.subheader("📰 Berita")
+    tab_saham, tab_umum = st.tabs(["📈 Saham", "🌐 Umum"])
 
-    if not _goapi_configured:
-        # ---- LOCKED / COMING SOON ----
-        # Fitur ini butuh langganan berbayar ke GOAPI.IO (Rp 550rb/bulan,
-        # bukan sekali bayar). Ditahan dulu sampai ada user berlangganan
-        # Pro di app ini, biar biayanya ke-cover — bukan nombok duluan.
-        # Begitu GOAPI_API_KEY diisi di Secrets, panel ini otomatis
-        # berubah jadi fungsional tanpa perlu ubah kode apa pun lagi.
+    with tab_saham:
+        df_scan = ensure_scanned()
+        tickers, portfolio_set = _build_stock_news_queries(df_scan, user_db, identifier)
+        if not tickers:
+            st.info("Belum ada saham untuk dicarikan beritanya (portofolio kosong & scan belum ada).")
+        else:
+            stock_news_queries = {t: f"{t.replace('.JK', '')} saham" for t in tickers}
+            with st.spinner("Mengambil berita saham terbaru..."):
+                news_items = get_all_stock_news(stock_news_queries)
+
+            if not news_items:
+                st.info(
+                    "Belum ada berita terbaru untuk watchlist kamu saat ini, "
+                    "atau Google News sedang tidak bisa diakses."
+                )
+            else:
+                # Prioritas: berita HARI INI yang menyangkut saham portofolio
+                # user ditaruh paling atas, sisanya tetap urut dari yang
+                # paling baru (sort dua tahap, keduanya stabil).
+                today = datetime.now().date()
+
+                def _is_today_portfolio(item):
+                    pub = parse_pub_date(item["pub_date"])
+                    return pub.date() == today and bool(set(item["matched_stocks"]) & portfolio_set)
+
+                news_items.sort(key=lambda item: parse_pub_date(item["pub_date"]), reverse=True)
+                news_items.sort(key=lambda item: 0 if _is_today_portfolio(item) else 1)
+                _render_news_cards(news_items, show_stock_tag=True)
+
+    with tab_umum:
+        with st.spinner("Mengambil berita ekonomi & IHSG terbaru..."):
+            general_news_items = get_general_market_news()
+
+        if not general_news_items:
+            st.info(
+                "Belum ada berita ekonomi/IHSG terbaru saat ini, "
+                "atau Google News sedang tidak bisa diakses."
+            )
+        else:
+            _render_news_cards(general_news_items, show_stock_tag=False)
+
+
+# ============================================================
+# ============================================================
+#  NAVIGASI HALAMAN — dashboard vs halaman fitur terpisah
+# ============================================================
+# PERBAIKAN (mobile-app-ready): dulu semua panel (Scan/Bandar/dst)
+# nongol DI BAWAH tombol menu, di halaman yang sama dengan dashboard.
+# Sekarang beneran dipecah jadi 2 "layar" terpisah:
+#   1) DASHBOARD (active_panel is None): HANYA Top Gainer/Loser + menu
+#      tombol + Berita. Tidak ada tabel/panel fitur di sini.
+#   2) HALAMAN FITUR (active_panel terisi): HANYA konten fitur yang
+#      dipilih + tombol "Kembali ke Dashboard" di atasnya. Dashboard,
+#      menu, dan Berita disembunyikan total selama di halaman ini.
+# Pola 1-layar-1-fungsi ini sengaja dipakai supaya gampang di-porting
+# ke navigasi tab/stack ala app Android/iOS nanti.
+if "active_panel" not in st.session_state:
+    st.session_state.active_panel = None
+
+MENU_ITEMS = [
+    ("scan", "🔍 SCAN MARKET"),
+    ("bandar", "🐋 BANDAR DETECTOR"),
+    ("breakout", "🚀 BREAKOUT SCANNER"),
+    ("swing", "📉 SWING ALERT"),
+    ("fake", "⚠️ FAKE BREAKOUT"),
+    ("telegram", "📲 SEND BEST TO TG"),
+    ("broker", "🏦 BROKER SUMMARY"),
+    ("community", "💬 KOMUNITAS"),
+]
+
+if st.session_state.active_panel is None:
+    # ===================== HALAMAN: DASHBOARD =====================
+    render_top_panel()
+    st.divider()
+
+    st.markdown("#### Menu")
+    menu_cols = st.columns(4)
+    for i, (panel_key, panel_label) in enumerate(MENU_ITEMS):
+        with menu_cols[i % 4]:
+            if st.button(panel_label, use_container_width=True, key=f"menu_{panel_key}"):
+                st.session_state.active_panel = panel_key
+                st.rerun()
+
+    st.divider()
+    render_news_section()
+
+else:
+    # ===================== HALAMAN: FITUR =====================
+    _panel = st.session_state.active_panel
+    if st.button("⬅ Kembali ke Dashboard", key="back_to_dashboard_btn"):
+        st.session_state.active_panel = None
+        st.rerun()
+    st.divider()
+
+    # ---- SCAN MARKET : tabel penuh, semua saham, semua metrik ----
+    if _panel == "scan":
+        df_scan = ensure_scanned()
+        st.subheader("📊 Hasil Scan Penuh")
+        df_display = df_scan.copy()
+        df_display["stock"] = df_display["stock"].apply(_display_ticker)
+        render_html_table(df_display)
+        if not df_scan.empty:
+            best = df_scan.iloc[0]
+            st.markdown(
+                f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
+                f'{signal_badge(best["signal"])} @ {best["price"]}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ---- BANDAR DETECTOR : hanya saham dengan aktivitas bandar non-netral ----
+    elif _panel == "bandar":
+        df_scan = ensure_scanned()
+        st.subheader("🐋 Deteksi Aktivitas Bandar")
+        bandar_hits = df_scan[df_scan["bandar"] != "NETRAL"]
+        if bandar_hits.empty:
+            st.info("Tidak ada aktivitas bandar signifikan hari ini.")
+        else:
+            for _, r in bandar_hits.iterrows():
+                st.markdown(
+                    f'<div class="card"><b>{_display_ticker(r["stock"])}</b> — {r["bandar"]} '
+                    f'(price: {r["price"]}) {signal_badge(r["signal"])}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ---- BREAKOUT SCANNER : saham dengan breakout valid ----
+    elif _panel == "breakout":
+        df_scan = ensure_scanned()
+        st.subheader("🚀 Saham Breakout Valid")
+        breakouts = df_scan[df_scan["score"] >= 50]
+        if breakouts.empty:
+            st.info("Belum ada breakout kuat terdeteksi.")
+        else:
+            df_display = breakouts[["stock", "price", "score", "signal", "entry", "tp", "sl"]].copy()
+            df_display["stock"] = df_display["stock"].apply(_display_ticker)
+            render_html_table(df_display)
+
+    # ---- SWING ALERT : saham yang drop >25% dari swing high ----
+    elif _panel == "swing":
+        df_scan = ensure_scanned()
+        st.subheader("📉 Swing Drop Alert (>25% dari high)")
+        swing_hits = df_scan[df_scan["swing"] == True]
+        if swing_hits.empty:
+            st.info("Tidak ada saham dengan swing drop signifikan.")
+        else:
+            df_display = swing_hits[["stock", "price", "drop", "trend", "signal"]].copy()
+            df_display["stock"] = df_display["stock"].apply(_display_ticker)
+            render_html_table(df_display)
+
+    # ---- FAKE BREAKOUT : breakout yang baru saja gagal ----
+    elif _panel == "fake":
+        df_scan = ensure_scanned()
+        st.subheader("⚠️ Fake Breakout Warning")
+        fake_hits = df_scan[df_scan["fake_breakout"] == True]
+        if fake_hits.empty:
+            st.info("Tidak ada fake breakout terdeteksi saat ini.")
+        else:
+            df_display = fake_hits[["stock", "price", "trend", "signal"]].copy()
+            df_display["stock"] = df_display["stock"].apply(_display_ticker)
+            render_html_table(df_display)
+
+    # ---- SEND BEST TO TELEGRAM : sekarang halaman sendiri dengan tombol
+    # konfirmasi terpisah, biar gak kekirim gak sengaja. ----
+    elif _panel == "telegram":
+        st.subheader("📲 Kirim Best Pick ke Telegram")
+        df_scan = ensure_scanned()
+        if df_scan.empty:
+            st.warning("Belum ada data untuk dikirim.")
+        else:
+            best = df_scan.iloc[0]
+            st.markdown(
+                f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
+                f'{signal_badge(best["signal"])} @ {best["price"]}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("📲 Kirim Sekarang", key="send_telegram_confirm_btn"):
+                msg = (
+                    f"BEST PICK: {_display_ticker(best['stock'])}\n"
+                    f"Signal: {best['signal']}\n"
+                    f"Price: {best['price']}\n"
+                    f"Entry: {best['entry']} | TP: {best['tp']} | SL: {best['sl']}"
+                )
+                ok = send_telegram(msg)
+                if ok:
+                    st.success("Terkirim ke Telegram ✅")
+                else:
+                    st.error("Gagal kirim ke Telegram — coba lagi sebentar lagi.")
+
+    # ---- BROKER SUMMARY : kode broker + volume beli/jual per saham,
+    # khusus data EOD (update setelah bursa tutup). ----
+    elif _panel == "broker":
+        st.subheader("🏦 Broker Summary (Data EOD)")
+
+        _goapi_configured = bool(GOAPI_API_KEY) and GOAPI_API_KEY != "ISI_API_KEY_GOAPI_LO"
+
+        if not _goapi_configured:
+            # ---- LOCKED / COMING SOON ----
+            # Fitur ini butuh langganan data premium. Ditahan dulu sampai
+            # ada user berlangganan Pro di app ini, biar biayanya
+            # ke-cover -- bukan nombok duluan. Begitu API key diisi di
+            # Secrets, panel ini otomatis berubah jadi fungsional tanpa
+            # perlu ubah kode apa pun lagi.
+            st.markdown(
+                """
+                <div class="card" style="text-align:center; padding: 40px 24px;">
+                    <div style="font-size:42px; margin-bottom:8px;">🔒</div>
+                    <div style="font-size:20px; font-weight:800; color:#ffffff; margin-bottom:8px;">
+                        Broker Summary — Segera Hadir
+                    </div>
+                    <div style="font-size:14px; color:#a9a7c4; max-width:520px; margin:0 auto 18px auto; line-height:1.6;">
+                        Fitur ini akan menampilkan kode broker, top broker pembeli & penjual,
+                        serta net akumulasi/distribusi untuk tiap saham (data resmi EOD, update
+                        setelah bursa tutup). Sedang dalam proses aktivasi langganan data —
+                        akan dibuka begitu tersedia.
+                    </div>
+                    <span class="badge badge-neutral">🔒 PREMIUM · SEGERA HADIR</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.info(
+                "Sementara menunggu, coba fitur **🐋 BANDAR DETECTOR** — deteksi indikasi "
+                "aktivitas bandar (akumulasi/markup/distribusi) berbasis pola volume & harga, "
+                "sudah aktif dan gratis."
+            )
+        else:
+            _render_broker_summary_panel()
+
+    # ---- KOMUNITAS : community feed (post, reaction, laporan spam) + bell
+    # notif sudah dipasang di header. Panel ini hanya untuk user aktif/owner
+    # (sudah dijamin karena st.stop() di atas kalau bukan owner/active). ----
+    elif _panel == "community":
+        st.subheader("💬 Komunitas SahamPro")
+        if not supabase_client:
+            st.warning(
+                "Community Feed belum aktif — SUPABASE_URL / SUPABASE_SERVICE_KEY "
+                "belum diisi di Secrets. Isi dulu supaya fitur ini jalan."
+            )
+        else:
+            render_community_feed(supabase_client, identifier, display_name)
+
+    # ---- PRIVASI AKUN : dibuka dari dropdown nama profil di header,
+    # bukan dari menu utama. Baru berisi info dasar akun -- kontrol
+    # privasi lebih detail (export data, hapus akun, dst) bisa
+    # ditambahkan di sini nanti tanpa ubah struktur navigasi. ----
+    elif _panel == "privacy":
+        st.subheader("🔒 Privasi Akun")
         st.markdown(
-            """
-            <div class="card" style="text-align:center; padding: 40px 24px;">
-                <div style="font-size:42px; margin-bottom:8px;">🔒</div>
-                <div style="font-size:20px; font-weight:800; color:#ffffff; margin-bottom:8px;">
-                    Broker Summary — Segera Hadir
-                </div>
-                <div style="font-size:14px; color:#a9a7c4; max-width:520px; margin:0 auto 18px auto; line-height:1.6;">
-                    Fitur ini akan menampilkan kode broker, top broker pembeli & penjual,
-                    serta net akumulasi/distribusi untuk tiap saham (data resmi EOD, update
-                    setelah bursa tutup). Sedang dalam proses aktivasi langganan data —
-                    akan dibuka begitu tersedia.
-                </div>
-                <span class="badge badge-wait">🔒 PREMIUM · SEGERA HADIR</span>
-            </div>
-            """,
+            f'<div class="card">'
+            f'<b>Username:</b> {display_name}<br>'
+            f'<b>Status akun:</b> {"Owner" if status == "owner" else ("Aktif berlangganan" if status == "active" else "Belum berlangganan")}<br>'
+            f'<b>Sesi login:</b> tersimpan aman di cookie terenkripsi di perangkat ini, '
+            f'berlaku {SESSION_DURATION_DAYS} hari sejak login terakhir.'
+            f'</div>',
             unsafe_allow_html=True,
         )
         st.info(
-            "Sementara menunggu, coba fitur **🐋 BANDAR DETECTOR** — deteksi indikasi "
-            "aktivitas bandar (akumulasi/markup/distribusi) berbasis pola volume & harga, "
-            "sudah aktif dan gratis."
+            "Kontrol privasi lain (mis. unduh/hapus data akun) belum tersedia di "
+            "halaman ini — akan ditambahkan menyusul. Untuk sekarang, gunakan "
+            "tombol Logout di menu profil kalau ingin mengakhiri sesi login di "
+            "perangkat ini."
         )
-    else:
-        _render_broker_summary_panel()
 
-# ---- KOMUNITAS : community feed (post, reaction, laporan spam) + bell
-# notif sudah dipasang di header. Panel ini hanya untuk user aktif/owner
-# (sudah dijamin karena st.stop() di atas kalau bukan owner/active). ----
-if st.session_state.active_panel == "community":
-    st.subheader("💬 Komunitas SahamPro")
-    if not supabase_client:
-        st.warning(
-            "Community Feed belum aktif — SUPABASE_URL / SUPABASE_SERVICE_KEY "
-            "belum diisi di Secrets. Isi dulu supaya fitur ini jalan."
-        )
-    else:
-        render_community_feed(supabase_client, identifier, display_name)
+    # ---- Tombol kembali kedua di bawah, biar gak perlu scroll ke atas
+    # lagi di halaman yang tabelnya panjang. ----
+    st.divider()
+    if st.button("⬅ Kembali ke Dashboard", key="back_to_dashboard_btn_bottom"):
+        st.session_state.active_panel = None
+        st.rerun()
 
-if st.session_state.active_panel is None and not btn_telegram:
-    st.markdown(
-        '<div class="card" style="text-align:center; color:#a9a7c4;">'
-        "Pilih salah satu tombol aksi di atas untuk mulai. "
-        "Panel Top Gainer/Loser di atas sudah auto-update sesuai interval refresh."
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 # ================== STRIPE WEBHOOK ==================
 # CATATAN PENTING: Streamlit TIDAK BISA menerima HTTP webhook secara langsung
@@ -2917,19 +3591,26 @@ if st.session_state.active_panel is None and not btn_telegram:
 # dengan username user yang sedang login (format "user:<username>", sama
 # seperti key yang dipakai user_db), supaya webhook ini tahu akun mana yang
 # harus diaktifkan setelah bayar. Contoh saat bikin checkout session:
-#   stripe.checkout.Session.create(..., client_reference_id=identifier)
+#   stripe.checkout.Session.create(
+#       ...,
+#       client_reference_id=identifier,
+#       # WAJIB juga diisi metadata "plan" sesuai tombol paket yang diklik
+#       # user, salah satu dari: "bulanan", "3_bulanan", "tahunan" -- ini
+#       # yang dipakai activate_subscription() buat hitung tanggal berakhir.
+#       metadata={"plan": "bulanan"},
+#   )
 def stripe_webhook(event):
     user_db = load_user_db()
     if event["type"] == "checkout.session.completed":
-        user_key = event["data"]["object"].get("client_reference_id")
+        obj = event["data"]["object"]
+        user_key = obj.get("client_reference_id")
+        plan = (obj.get("metadata") or {}).get("plan", "bulanan")
         if user_key:
-            existing = user_db.get(user_key, {})
-            existing["status"] = "active"
-            user_db[user_key] = existing
+            activate_subscription(user_db, user_key, plan)
     elif event["type"] == "invoice.payment_failed":
         user_key = event["data"]["object"].get("client_reference_id")
         if user_key:
             existing = user_db.get(user_key, {})
             existing["status"] = "inactive"
             user_db[user_key] = existing
-    save_user_db(user_db)
+            save_user_db(user_db)
