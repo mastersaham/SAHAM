@@ -1095,6 +1095,82 @@ st.markdown("""
         transform: translateY(-3px);
         color: #ffd28a;
     }
+
+    /* ---------------------------------------------------------
+       ROCKET LOADING OVERLAY — nutupin transisi kasar pas abis
+       login (form auth ilang -> dashboard render bertahap). Full-
+       screen, nunjukin sebentar, terus fade-out sendiri via CSS
+       animation-delay (jadi gak perlu JS buat timer-nya).
+    --------------------------------------------------------- */
+    .rocket-loading-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background:
+            radial-gradient(circle at 50% 35%, rgba(255,170,50,0.16) 0%, rgba(255,170,50,0) 55%),
+            #0b0c16;
+        animation: rocket-overlay-fadeout 0.6s ease forwards;
+        animation-delay: 1.4s;
+        pointer-events: none;
+    }
+    .rocket-loading-emoji {
+        font-size: 64px;
+        line-height: 1;
+        animation: rocket-launch 1.4s ease-in-out infinite;
+        filter: drop-shadow(0 8px 18px rgba(255,170,50,0.45));
+    }
+    .rocket-loading-text {
+        font-family: 'Poppins', sans-serif;
+        font-weight: 700;
+        font-size: 16px;
+        letter-spacing: 0.4px;
+        color: #ffd28a;
+    }
+    .rocket-loading-dots span {
+        animation: rocket-dot-blink 1.2s infinite;
+        opacity: 0.2;
+    }
+    .rocket-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .rocket-loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+    .rocket-loading-bar {
+        width: 180px;
+        height: 4px;
+        border-radius: 4px;
+        background: rgba(255,255,255,0.08);
+        overflow: hidden;
+    }
+    .rocket-loading-bar::after {
+        content: "";
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: 4px;
+        background: linear-gradient(90deg, #ff8a1f, #ffd400);
+        animation: rocket-bar-slide 1.1s ease-in-out infinite;
+    }
+    @keyframes rocket-launch {
+        0%   { transform: translateY(0) rotate(0deg); }
+        50%  { transform: translateY(-14px) rotate(-4deg); }
+        100% { transform: translateY(0) rotate(0deg); }
+    }
+    @keyframes rocket-dot-blink {
+        0%, 80%, 100% { opacity: 0.2; }
+        40% { opacity: 1; }
+    }
+    @keyframes rocket-bar-slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(340%); }
+    }
+    @keyframes rocket-overlay-fadeout {
+        0%   { opacity: 1; }
+        99%  { opacity: 0; }
+        100% { opacity: 0; visibility: hidden; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1292,6 +1368,7 @@ def render_auth_panel(user_db):
                     else:
                         st.session_state["auth_identifier"] = f"user:{uname}"
                         st.session_state["auth_display_name"] = uname
+                        st.session_state["just_logged_in"] = True
                         save_login_cookie(uname)
                         st.rerun()
 
@@ -1467,10 +1544,23 @@ if not identifier and not st.session_state.pop("skip_cookie_restore", False):
         display_name = _uname_from_cookie
         st.session_state["auth_identifier"] = identifier
         st.session_state["auth_display_name"] = display_name
+        st.session_state["just_logged_in"] = True
 
 if not identifier:
     render_auth_panel(load_user_db())
     st.stop()
+
+if st.session_state.pop("just_logged_in", False):
+    st.markdown("""
+    <div class="rocket-loading-overlay">
+        <div class="rocket-loading-emoji">🚀</div>
+        <div class="rocket-loading-text">
+            Menyiapkan dashboard
+            <span class="rocket-loading-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+        <div class="rocket-loading-bar"></div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ---- User sudah punya identitas, cek status langganan ----
 user_db = load_user_db()
