@@ -128,21 +128,6 @@ SESSION_DURATION_DAYS = 30
 cookies = EncryptedCookieManager(prefix="aiidx_", password=COOKIE_PASSWORD)
 if not cookies.ready():
     # Komponen cookie butuh 1x render awal buat sinkron ke browser.
-    # PERBAIKAN: dulu di sini langsung st.stop() tanpa nampilin apa-apa,
-    # jadi user lihat layar kosong ~1-2 detik sebelum kelihatan udah
-    # login atau belum. Sekarang dikasih placeholder ringan biar gak
-    # kerasa "nge-hang" -- placeholder ini otomatis ke-replace begitu
-    # rerun berikutnya jalan (cookies udah ready).
-    st.markdown(
-        """
-        <div style="display:flex; align-items:center; justify-content:center;
-                    height:60vh; flex-direction:column; gap:10px;">
-            <div style="font-size:32px;">🚀</div>
-            <div style="color:#a9a7c4; font-size:14px;">Memuat sesi...</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     st.stop()
 
 
@@ -268,7 +253,6 @@ ISSI_FALLBACK_STOCKS = [
 ]
 
 
-@st.cache_data(ttl=20, show_spinner=False)
 def load_user_db():
     client = get_supabase_client()
     if client is None:
@@ -298,13 +282,6 @@ def load_user_db():
 
 
 def save_user_db(db):
-    # PERBAIKAN: load_user_db() sekarang di-cache (ttl=20s) supaya gak nembak
-    # Supabase di setiap rerun. Konsekuensinya, tiap kali kita nulis data baru
-    # lewat fungsi ini, cache lama harus langsung dibuang -- kalau tidak, user
-    # yang baru daftar/ganti password/upgrade langganan bisa lihat data basi
-    # sampai 20 detik ke depan.
-    load_user_db.clear()
-
     client = get_supabase_client()
     if client is None:
         # Fallback: sama seperti di load_user_db(), simpan ke JSON lokal.
