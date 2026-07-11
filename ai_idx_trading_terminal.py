@@ -1333,9 +1333,16 @@ if _reset_token_param and _reset_uname_param:
 identifier = st.session_state.get("auth_identifier")
 display_name = st.session_state.get("auth_display_name", identifier)
 
-if not identifier:
+if not identifier and not st.session_state.pop("skip_cookie_restore", False):
     # Belum ada sesi di session_state (misal karena tab baru / reload) —
     # coba pulihkan otomatis dari cookie sebelum minta login ulang.
+    #
+    # CATATAN: flag "skip_cookie_restore" dicek di sini untuk menghindari
+    # race condition saat logout. EncryptedCookieManager menghapus cookie
+    # lewat komponen JS yang butuh 1 siklus komunikasi browser<->server;
+    # kalau kita langsung st.rerun() setelah clear_login_cookie(), rerun
+    # itu bisa kejadian SEBELUM cookie beneran terhapus di browser, jadi
+    # tanpa flag ini user akan otomatis ke-login lagi dari cookie lama.
     _user_db_for_cookie_check = load_user_db()
     _uname_from_cookie = load_login_cookie(_user_db_for_cookie_check)
     if _uname_from_cookie:
@@ -1384,6 +1391,9 @@ with st.container(key="header_status_bar"):
             st.session_state.pop("auth_identifier", None)
             st.session_state.pop("auth_display_name", None)
             clear_login_cookie()
+            # Cegah cookie lama (yang mungkin belum sempat kehapus di
+            # browser saat rerun ini terjadi) auto-login-in kita lagi.
+            st.session_state["skip_cookie_restore"] = True
             st.rerun()
 
 if status not in ("owner", "active"):
