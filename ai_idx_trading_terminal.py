@@ -27,6 +27,21 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from datetime import time as dtime_cls
+
+# PERBAIKAN (Segmentation fault saat startup): streamlit-cookies-manager
+# secara internal masih pakai @st.cache (API lama yang sudah deprecated)
+# di salah satu fungsinya. Berdasarkan log crash, app mati dengan
+# "Segmentation fault" TEPAT setelah warning "st.cache is deprecated"
+# muncul -- jadi kemungkinan besar ini bug di implementasi lama st.cache
+# di versi Streamlit ini, bukan di kode kita atau di cryptography.
+# Kita gak bisa edit file library pihak ketiga itu langsung, jadi di sini
+# st.cache "dialihkan" ke st.cache_resource (API baru yang jadi
+# penggantinya, perilakunya setara untuk pemakaian sederhana seperti ini)
+# SEBELUM library-nya di-import, supaya begitu dia pasang @st.cache,
+# yang kepasang sebenarnya st.cache_resource. Kode kita sendiri sudah
+# 100% pakai st.cache_data/st.cache_resource, jadi aman gak kepengaruh.
+st.cache = st.cache_resource
+
 from streamlit_cookies_manager import EncryptedCookieManager
 from supabase import create_client
 
