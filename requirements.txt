@@ -8,15 +8,3 @@ streamlit-autorefresh==1.0.1
 streamlit-cookies-manager==0.2.0
 supabase==2.31.0
 midtransclient==1.4.2
-
-# Dipin manual: cryptography sebelumnya IKUT TERBAWA otomatis (dependency
-# transitif dari streamlit-cookies-manager/supabase) tanpa versi tetap,
-# jadi tiap deploy ulang bisa ke-install versi PALING BARU yang ada saat
-# itu. Ini yang bikin app crash "Segmentation fault" begitu app dijalankan
-# -- crash-nya kejadian persis pas panggilan PBKDF2HMAC (dipakai buat
-# enkripsi cookie login), pas ke-install cryptography==49.0.0 yang baru
-# rilis ~1 bulan sebelum crash ini terjadi, kemungkinan ada masalah
-# kompatibilitas wheel biner dengan image Docker Streamlit Cloud.
-# Dipin ke versi yang lebih matang & sudah lama stabil dipakai banyak
-# orang, bukan versi paling baru.
-cryptography==46.0.7
