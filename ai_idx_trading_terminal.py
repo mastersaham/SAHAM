@@ -178,9 +178,82 @@ SESSION_DURATION_DAYS = 30
 #  COOKIE MANAGER — supaya user tetap login walau tab/browser
 #  ditutup dan dibuka lagi (gak perlu login ulang tiap buka app),
 #  sampai dia benar-benar pencet tombol Logout atau cookie expired.
+#
+# PERBAIKAN (diagnosa Segmentation fault saat boot): EncryptedCookieManager
+# pakai `cryptography`/`cffi` (native/C extension) untuk enkripsi cookie,
+# dan objek ini dibuat ULANG di SETIAP kali script Streamlit di-run --
+# artinya ini SATU-SATUNYA kode native/crypto yang jalan di SETIAP render
+# halaman untuk SEMUA user (beda dengan yfinance/curl_cffi yang cuma jalan
+# saat user buka detail 1 saham). Kalau ada incompatibility versi
+# cryptography/cffi di server, titik inilah yang paling mungkin jadi
+# biang segfault yang muncul tepat setelah boot.
+#
+# Supaya bisa DIUJI tanpa ubah-ubah kode/deploy ulang berkali-kali,
+# ditambahkan flag SAFE_MODE_NO_COOKIES lewat Secrets:
+#
+#     SAFE_MODE_NO_COOKIES = true
+#
+# Kalau di-set true, app SAMA SEKALI TIDAK memuat EncryptedCookieManager
+# (login sesi jadi tidak persisten antar refresh browser -- user harus
+# login ulang tiap buka app -- tapi fitur lain tetap normal). Ini murni
+# alat diagnosa: nyalakan flag ini, redeploy, lalu lihat apakah
+# "Segmentation fault saat boot" masih muncul atau tidak.
+#   - Kalau MASIH crash dengan flag ini nyala -> penyebabnya BUKAN di
+#     cookie manager, cari di tempat lain (kemungkinan dependency lain
+#     atau resource/RAM limit Streamlit Cloud).
+#   - Kalau TIDAK crash lagi -> terkonfirmasi cookie manager /
+#     cryptography-cffi penyebabnya, dan cookie manager ini sebaiknya
+#     diganti library lain yang lebih aktif di-maintain.
+#
+# Matikan lagi flag ini begitu selesai diagnosa, supaya fitur "tetap
+# login" balik normal.
 # ============================================================
-cookies = EncryptedCookieManager(prefix="aiidx_", password=COOKIE_PASSWORD)
-if not cookies.ready():
+SAFE_MODE_NO_COOKIES = str(st.secrets.get("SAFE_MODE_NO_COOKIES", "false")).lower() == "true"
+
+
+class _NoOpCookieJar:
+    """Stub cookie jar dipakai saat SAFE_MODE_NO_COOKIES aktif, supaya
+    save_login_cookie()/load_login_cookie()/clear_login_cookie() di bawah
+    tetap bisa dipanggil tanpa error -- cuma datanya gak pernah benar-benar
+    tersimpan ke browser (login tidak persisten selama mode ini aktif)."""
+
+    def __init__(self):
+        self._data = {}
+
+    def ready(self):
+        return True
+
+    def save(self):
+        pass
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __setitem__(self, key, value):
+        self._data[key] = value
+
+    def __delitem__(self, key):
+        self._data.pop(key, None)
+
+
+if SAFE_MODE_NO_COOKIES:
+    st.info(
+        "🔧 SAFE_MODE_NO_COOKIES aktif — cookie manager dinonaktifkan "
+        "sementara untuk diagnosa. Login tidak akan tersimpan antar "
+        "refresh browser sampai flag ini dimatikan lagi di Secrets.",
+        icon="🔧",
+    )
+    cookies = _NoOpCookieJar()
+else:
+    cookies = EncryptedCookieManager(prefix="aiidx_", password=COOKIE_PASSWORD)
+
+if (not SAFE_MODE_NO_COOKIES) and not cookies.ready():
     # Komponen cookie butuh 1x render awal buat sinkron ke browser.
     # PERBAIKAN: dulu di sini langsung st.stop() tanpa nampilin apa-apa,
     # jadi user lihat layar kosong ~1-2 detik sebelum kelihatan udah
