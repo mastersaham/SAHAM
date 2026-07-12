@@ -27,6 +27,21 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from datetime import time as dtime_cls
+
+# PERBAIKAN (Segmentation fault saat startup): streamlit-cookies-manager
+# secara internal masih pakai @st.cache (API lama yang sudah deprecated)
+# di salah satu fungsinya. Berdasarkan log crash, app mati dengan
+# "Segmentation fault" TEPAT setelah warning "st.cache is deprecated"
+# muncul -- jadi kemungkinan besar ini bug di implementasi lama st.cache
+# di versi Streamlit ini, bukan di kode kita atau di cryptography.
+# Kita gak bisa edit file library pihak ketiga itu langsung, jadi di sini
+# st.cache "dialihkan" ke st.cache_resource (API baru yang jadi
+# penggantinya, perilakunya setara untuk pemakaian sederhana seperti ini)
+# SEBELUM library-nya di-import, supaya begitu dia pasang @st.cache,
+# yang kepasang sebenarnya st.cache_resource. Kode kita sendiri sudah
+# 100% pakai st.cache_data/st.cache_resource, jadi aman gak kepengaruh.
+st.cache = st.cache_resource
+
 from streamlit_cookies_manager import EncryptedCookieManager
 from supabase import create_client
 
@@ -148,13 +163,53 @@ if not cookies.ready():
         """
         <div style="display:flex; align-items:center; justify-content:center;
                     height:60vh; flex-direction:column; gap:10px;">
-            <div style="font-size:32px;">🚀</div>
             <div style="color:#a9a7c4; font-size:14px;">Memuat sesi...</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.stop()
+
+# ============================================================
+#  KONFIRMASI LOGOUT — nunggu cookie BENERAN kehapus di browser
+#  sebelum lanjut, bukan cuma nebak pakai time.sleep().
+#
+#  EncryptedCookieManager nyimpen instruksi hapus di
+#  st.session_state["CookieManager.queue"] dan baru dikirim ke
+#  browser lewat komponen JS. Instruksi itu baru dianggap
+#  "selesai" (dihapus dari antrean) begitu 1 siklus render
+#  berikutnya mengonfirmasi cookie-nya udah gak ada lagi. Kalau
+#  kita langsung st.rerun() begitu klik Logout tanpa nunggu
+#  konfirmasi ini, ada race: script pindah ke halaman login duluan
+#  padahal cookie lama masih nyangkut di browser -- jadi begitu
+#  user refresh, dia ke-auto-login lagi dari cookie basi itu.
+#
+#  Di sini kita loop (dengan batas maksimum biar gak hang selamanya
+#  kalau ada gangguan jaringan) sampai cookie "auth_session" benar2
+#  hilang dari cookies, baru lanjut nampilin halaman login.
+# ============================================================
+if st.session_state.get("logout_confirm_pending"):
+    _logout_tries = st.session_state.get("logout_confirm_tries", 0)
+    _cookie_confirmed_gone = cookies.ready() and "auth_session" not in cookies
+    if _cookie_confirmed_gone or _logout_tries >= 10:
+        # Kehapus beneran (atau kita udah nunggu ~2 detik dan nyerah --
+        # session_state sisi kita udah bersih jadi user tetap efektif
+        # logout meski cookie fisiknya lelet kehapus).
+        st.session_state.pop("logout_confirm_pending", None)
+        st.session_state.pop("logout_confirm_tries", None)
+    else:
+        st.session_state["logout_confirm_tries"] = _logout_tries + 1
+        st.markdown(
+            """
+            <div style="display:flex; align-items:center; justify-content:center;
+                        height:60vh; flex-direction:column; gap:10px;">
+                <div style="color:#a9a7c4; font-size:14px;">Logout...</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.2)
+        st.rerun()
 
 
 def save_login_cookie(username):
@@ -734,25 +789,51 @@ st.markdown("""
         overflow: visible;
         text-align: center;
     }
-    .orange-topbar-title {
-        font-size: 30px;
+    /* Header halaman DAFTAR/LOGIN (belum masuk): roket di atas judul,
+       goyang terus-menerus (pakai animasi yang sama dengan roket loading),
+       judul besar dengan gradasi oranye. */
+    .login-hero-rocket {
+        font-size: 46px;
+        line-height: 1;
+        animation: rocket-launch 1.4s ease-in-out infinite;
+    }
+    .login-hero-title {
+        font-size: 34px;
         font-weight: 800;
-        color: #ffd400;
         margin-top: 10px;
         letter-spacing: 0.3px;
         line-height: 1.25;
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
+        background: linear-gradient(90deg, #ff8a1f, #ffd400);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
     }
-    .orange-topbar-rocket {
-        fill: #ffd400;
-        flex-shrink: 0;
-    }
-    .orange-topbar-sub {
+    .login-hero-sub {
         font-size: 14px;
         color: #a9a7c4;
         margin-top: 8px;
+    }
+    /* Header di DALAM dashboard (sudah login): cuma judul, tanpa roket,
+       ukuran lebih kecil dari hero login. */
+    .dash-topbar {
+        margin: 0 -1rem 18px -1rem;
+        padding: 8px 26px 14px 26px;
+        background: transparent;
+        text-align: center;
+    }
+    .dash-topbar-title {
+        font-size: 20px;
+        font-weight: 800;
+        letter-spacing: 0.3px;
+        background: linear-gradient(90deg, #ff8a1f, #ffd400);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+    .dash-topbar-sub {
+        font-size: 13px;
+        color: #a9a7c4;
+        margin-top: 6px;
     }
 
     .terminal-header {
@@ -1185,18 +1266,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<div class="orange-topbar">
-    <div class="orange-topbar-title">
-        <svg class="orange-topbar-rocket" viewBox="0 0 24 24" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 2C9 5 7 9 7 13c0 1.5.5 3 1.5 4L7 21l3-1.5L12 21l2-1.5L17 21l-1.5-4c1-1 1.5-2.5 1.5-4 0-4-2-8-5-11z"/>
-            <circle cx="12" cy="11" r="1.4" fill="#0b0c16"/>
-        </svg>
-        RITEL SYARIAH
-    </div>
-    <div class="orange-topbar-sub">Khusus saham syariah, semoga berkah</div>
-</div>
-""", unsafe_allow_html=True)
+# CATATAN: header brand "RITEL SYARIAH" dulu dirender di sini secara
+# tanpa syarat (jadi sama persis baik di halaman daftar/login maupun di
+# dalam dashboard). Sekarang dipecah jadi 2 versi berbeda, dirender di
+# tempat yang tepat sesuai status login:
+#   1) Halaman daftar/login (belum ada identitas) -> hero besar dengan
+#      roket goyang di atas judul (lihat sebelum render_auth_panel()).
+#   2) Di dalam dashboard (sudah login) -> judul kecil tanpa roket
+#      (lihat sesudah identitas ditentukan), dengan subjudul yang
+#      berbeda dan cuma tampil di halaman utama/home.
 
 # ============================================================
 #  AUTH / SUBSCRIPTION GATE
@@ -1558,6 +1636,13 @@ if not identifier and not st.session_state.pop("skip_cookie_restore", False):
         st.session_state["just_logged_in"] = True
 
 if not identifier:
+    st.markdown("""
+    <div class="orange-topbar">
+        <div class="login-hero-rocket">🚀</div>
+        <div class="login-hero-title">RITEL SYARIAH</div>
+        <div class="login-hero-sub">Khusus saham syariah, semoga berkah</div>
+    </div>
+    """, unsafe_allow_html=True)
     render_auth_panel(load_user_db())
     st.stop()
 
@@ -1572,6 +1657,12 @@ if st.session_state.pop("just_logged_in", False):
         <div class="rocket-loading-bar"></div>
     </div>
     """, unsafe_allow_html=True)
+
+st.markdown("""
+<div class="dash-topbar">
+    <div class="dash-topbar-title">RITEL SYARIAH</div>
+</div>
+""", unsafe_allow_html=True)
 
 # ---- User sudah punya identitas, cek status langganan ----
 user_db = load_user_db()
@@ -1668,18 +1759,16 @@ with st.container(key="header_status_bar"):
                 # Cegah cookie lama (yang mungkin belum sempat kehapus di
                 # browser saat rerun ini terjadi) auto-login-in kita lagi.
                 st.session_state["skip_cookie_restore"] = True
-                # PERBAIKAN (bug "harus klik 2x"): EncryptedCookieManager
-                # menghapus cookie lewat komponen JS yang butuh 1 kali
-                # pulang-pergi komunikasi browser<->server. Kalau
-                # st.rerun() dipanggil PERSIS sesudah clear_login_cookie(),
-                # rerun itu sering kejadian SEBELUM instruksi hapus cookie
-                # beneran sampai & disinkronkan ke browser -- jadi klik
-                # pertama kelihatan "gak ngefek", baru klik kedua yang
-                # kerasa. Jeda singkat ini kasih waktu component itu
-                # menyelesaikan pulang-pergi tadi sebelum halaman di-render
-                # ulang, jadi 1x klik langsung keluar.
-                with st.spinner("Logout..."):
-                    time.sleep(0.35)
+                # PERBAIKAN: dulu di sini cuma time.sleep(0.35) lalu
+                # langsung st.rerun() -- itu tebakan buta, gak beneran
+                # ngecek apakah cookie-nya udah kehapus di browser. Kalau
+                # koneksi lagi lambat, delay segitu gak cukup: user lihat
+                # tombol "nyangkut", dan kalau keburu refresh, cookie lama
+                # masih ada jadi balik ke-login lagi. Sekarang kita cuma
+                # nyalain flag "logout_confirm_pending" -- pengecekan &
+                # loop tunggu konfirmasi asli (bukan tebakan) ada di awal
+                # skrip, jalan tiap rerun sampai cookie beneran hilang.
+                st.session_state["logout_confirm_pending"] = True
                 st.rerun()
 
     if col_notif is not None:
@@ -3566,6 +3655,10 @@ MENU_ITEMS = [
 
 if st.session_state.active_panel is None:
     # ===================== HALAMAN: DASHBOARD =====================
+    st.markdown(
+        '<div class="dash-topbar-sub">Indikator analisa saham, bukan ajakan jual beli</div>',
+        unsafe_allow_html=True,
+    )
     render_stock_search_bar("dashboard_search_form")
     render_top_panel()
     st.divider()
