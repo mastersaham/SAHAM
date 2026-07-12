@@ -161,8 +161,9 @@ if not cookies.ready():
     # rerun berikutnya jalan (cookies udah ready).
     st.markdown(
         """
-        <div style="display:flex; align-items:center; justify-content:center;
-                    height:60vh; flex-direction:column; gap:10px;">
+        <div style="position:fixed; inset:0; z-index:999999;
+                    background:#0b0c16; display:flex; align-items:center;
+                    justify-content:center; flex-direction:column; gap:10px;">
             <div style="color:#a9a7c4; font-size:14px;">Memuat sesi...</div>
         </div>
         """,
@@ -201,8 +202,9 @@ if st.session_state.get("logout_confirm_pending"):
         st.session_state["logout_confirm_tries"] = _logout_tries + 1
         st.markdown(
             """
-            <div style="display:flex; align-items:center; justify-content:center;
-                        height:60vh; flex-direction:column; gap:10px;">
+            <div style="position:fixed; inset:0; z-index:999999;
+                        background:#0b0c16; display:flex; align-items:center;
+                        justify-content:center; flex-direction:column; gap:10px;">
                 <div style="color:#a9a7c4; font-size:14px;">Logout...</div>
             </div>
             """,
