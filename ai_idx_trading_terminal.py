@@ -11,7 +11,18 @@ import gc
 import numpy as np
 import xml.etree.ElementTree as ET
 import pandas as pd
-import yfinance as yf
+# PERBAIKAN: "import yfinance as yf" DIPINDAH dari sini ke dalam masing-
+# masing fungsi yang benar-benar memakainya (get_quick_quote,
+# get_stock_history, get_stock_fundamentals). Alasannya: yfinance ikut
+# me-load curl_cffi (native lib buat nembus deteksi bot Yahoo) yang
+# dicurigai jadi penyebab "Segmentation fault" di Streamlit Cloud.
+# Kalau "import yfinance" ditaruh di sini (paling atas file), dia jalan
+# SETIAP kali app boot -- buat SEMUA user, bahkan yang cuma buka
+# dashboard dan gak butuh yfinance sama sekali (dashboard sudah baca
+# data dari Supabase, lihat _load_central_scan). Dengan lazy-import,
+# yfinance/curl_cffi baru ke-load pas ada user yang BENERAN buka
+# halaman detail 1 saham -- jadi kalaupun curl_cffi crash, dampaknya
+# cuma ke fitur itu, bukan bikin seluruh app mati buat semua orang.
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
@@ -1749,13 +1760,21 @@ def get_all_data(stocks_tuple):
     for i in range(0, len(stocks), BATCH_SIZE):
         batch = stocks[i:i + BATCH_SIZE]
         try:
+            import yfinance as yf
             raw = yf.download(
                 batch,
                 period="3mo",
                 interval="1d",
                 progress=False,
                 group_by="ticker",
-                threads=True,
+                # PERBAIKAN: threads=True bikin yfinance buka banyak sesi
+                # curl_cffi SEKALIGUS secara paralel -- curl_cffi (native lib
+                # buat nembus deteksi bot Yahoo) belum sepenuhnya thread-safe
+                # kalau dipakai konkuren begini, dan ini yang bikin proses mati
+                # (segmentation fault) di Streamlit Cloud. threads=False bikin
+                # tiap batch didownload berurutan -- sedikit lebih lambat,
+                # tapi batch-nya sudah kecil (60 saham) jadi masih cepat.
+                threads=False,
                 auto_adjust=True,
             )
         except Exception:
@@ -1854,6 +1873,7 @@ def get_quick_quote(ticker_jk):
     add_to_portfolio — script Streamlit berhenti di st.stop() sebelum
     sempat mengeksekusi definisi fungsi yang ditulis lebih ke bawah.)"""
     try:
+        import yfinance as yf
         df = yf.Ticker(ticker_jk).history(period="10d", interval="1d", auto_adjust=True)
         if df is None or df.empty or len(df) < 2:
             return None
@@ -2902,6 +2922,7 @@ def get_stock_history(ticker_jk, period_label):
             pass
 
     try:
+        import yfinance as yf
         ticker_obj = yf.Ticker(ticker_jk)
         if days is None:
             # "Sejak IPO" — ambil data paling panjang yang tersedia di yfinance
@@ -2946,6 +2967,7 @@ def get_stock_fundamentals(ticker_jk):
         except Exception:
             pass
     try:
+        import yfinance as yf
         info = yf.Ticker(ticker_jk).info or {}
         fields["nama"] = info.get("longName") or info.get("shortName")
         fields["sektor"] = info.get("sector")
