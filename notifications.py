@@ -81,37 +81,92 @@ def render_notification_bell(supabase, user_id: str, limit: int = 20):
         return
 
     unread = get_unread_count(supabase, user_id)
-    badge = f" ({unread})" if unread else ""
 
-    with st.popover(f"🔔{badge}", help="Notifikasi"):
-        st.markdown("**Notifikasi**")
+    # PERBAIKAN (tampilan): dulu badge jumlah notif ditulis nempel di
+    # label tombol ("🔔 (3)"), beda gaya sama ikon-ikon lain di bottom
+    # nav bar (yang polos, cuma SVG). Sekarang label tombolnya cuma
+    # "🔔" polos, dan jumlah notif ditampilkan sebagai badge bulat
+    # merah kecil yang di-overlay di pojok kanan-atas ikon lewat CSS
+    # -- konsisten dengan gaya badge notifikasi di app pada umumnya.
+    with st.container(key="notif_bell_wrap"):
+        with st.popover("🔔", help="Notifikasi"):
+            st.markdown("**Notifikasi**")
+
+            if unread:
+                if st.button("Tandai semua sudah dibaca", key="mark_all_read"):
+                    mark_all_read(supabase, user_id)
+                    st.rerun()
+
+            try:
+                res = supabase.table("notifications").select("*").eq(
+                    "recipient_id", user_id
+                ).order("created_at", desc=True).limit(limit).execute()
+                notifs = res.data or []
+            except Exception as e:
+                st.caption(f"Gagal memuat notifikasi: {e}")
+                notifs = None
+
+            if notifs is not None:
+                if not notifs:
+                    st.caption("Belum ada notifikasi.")
+                else:
+                    for n in notifs:
+                        emoji = n.get("emoji") or ""
+                        label = NTYPE_LABELS.get(n.get("type"), n.get("type", ""))
+                        prefix = "🔵 " if not n.get("is_read") else ""
+                        actor = n.get("actor_username", "Seseorang")
+                        st.markdown(f"{prefix}**{actor}** {emoji} {label}")
+                        st.caption(_time_ago(n.get("created_at", "")))
+                        st.divider()
 
         if unread:
-            if st.button("Tandai semua sudah dibaca", key="mark_all_read"):
-                mark_all_read(supabase, user_id)
-                st.rerun()
+            badge_text = "9+" if unread > 9 else str(unread)
+            st.markdown(
+                f'<div class="notif-badge-dot">{badge_text}</div>',
+                unsafe_allow_html=True,
+            )
 
-        try:
-            res = supabase.table("notifications").select("*").eq(
-                "recipient_id", user_id
-            ).order("created_at", desc=True).limit(limit).execute()
-            notifs = res.data or []
-        except Exception as e:
-            st.caption(f"Gagal memuat notifikasi: {e}")
-            return
-
-        if not notifs:
-            st.caption("Belum ada notifikasi.")
-            return
-
-        for n in notifs:
-            emoji = n.get("emoji") or ""
-            label = NTYPE_LABELS.get(n.get("type"), n.get("type", ""))
-            prefix = "🔵 " if not n.get("is_read") else ""
-            actor = n.get("actor_username", "Seseorang")
-            st.markdown(f"{prefix}**{actor}** {emoji} {label}")
-            st.caption(_time_ago(n.get("created_at", "")))
-            st.divider()
+    # CSS ikon bell + badge -- diinjeksi di sini (bukan di file app utama)
+    # supaya notifications.py tetap "self-contained" dan portable, tidak
+    # bergantung style harus ditaruh di tempat lain. st.markdown dgn
+    # <style> yang sama dipanggil ulang tiap render itu aman/idempotent
+    # di browser, cuma nambah elemen <style> duplikat yang efeknya nol.
+    st.markdown(
+        """
+        <style>
+        .st-key-notif_bell_wrap { position: relative; }
+        .st-key-notif_bell_wrap button {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: #ffb35c !important;
+            font-size: 21px !important;
+            height: 42px !important;
+            min-height: 42px !important;
+            padding: 0 !important;
+        }
+        .notif-badge-dot {
+            position: absolute;
+            top: 2px;
+            right: 8px;
+            background: #ff3b30;
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1;
+            min-width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 3px;
+            pointer-events: none;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _time_ago(created_at_str: str) -> str:

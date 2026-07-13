@@ -807,27 +807,94 @@ st.markdown("""
         font-weight: 700;
         margin-right: 6px;
     }
-    .st-key-header_status_bar {
-        position: sticky;
-        top: 0;
-        z-index: 999;
-        background: linear-gradient(135deg, #ffe27a, #ffc700);
-        backdrop-filter: blur(6px);
-        padding: 10px 4px 6px 4px;
-        margin: -10px -4px 10px -4px;
-        border-bottom: 1px solid rgba(120,90,0,0.25);
-        border-radius: 0 0 18px 18px;
+    /* ---------------------------------------------------------
+       BOTTOM NAV BAR -- 5 ikon polos, fixed nempel di bawah layar,
+       gak ikut kescroll (kayak Stockbit). Streamlit otomatis numpuk
+       st.columns jadi vertikal kalau layar sempit (HP); supaya TETAP
+       satu baris, flex-wrap dipaksa "nowrap" + tiap kolom dipaksa
+       flex-shrink lewat CSS di bawah ini.
+    --------------------------------------------------------- */
+    .st-key-bottom_nav_bar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 9999;
+        background: linear-gradient(180deg, rgba(28,16,6,0.92), rgba(8,5,2,0.98));
+        border-top: 1px solid rgba(255,170,60,0.25);
+        padding: 6px 8px calc(6px + env(safe-area-inset-bottom)) 8px;
+        backdrop-filter: blur(10px);
     }
-    /* Tombol home di dalam card kuning header -- dibikin transparan +
-       beda gaya dari tombol aksi oranye lain, biar nyatu sama warna card. */
-    .st-key-header_status_bar div.stButton > button {
-        background: rgba(255,255,255,0.35);
-        color: #3a2900;
-        box-shadow: none;
+    .st-key-bottom_nav_bar [data-testid="stHorizontalBlock"] {
+        flex-wrap: nowrap !important;
+        gap: 0 !important;
     }
-    .st-key-header_status_bar div.stButton > button:hover {
-        background: rgba(255,255,255,0.55);
-        transform: translateY(-1px);
+    .st-key-bottom_nav_bar [data-testid="column"] {
+        min-width: 0 !important;
+        flex: 1 1 0 !important;
+        width: auto !important;
+    }
+    /* Tombol ikon polos: transparan total, label teks aslinya dibikin
+       tak-kelihatan (buat aksesibilitas/screen-reader tetap kebaca),
+       yang tampil cuma SVG overlay di atasnya. */
+    [class*="st-key-navicon_"] {
+        position: relative;
+    }
+    [class*="st-key-navicon_"] button {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        color: transparent !important;
+        height: 42px !important;
+        min-height: 42px !important;
+        padding: 0 !important;
+        font-size: 0 !important;
+        transform: none !important;
+    }
+    .nav-icon-overlay {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+        color: #ffb35c;
+    }
+    .nav-icon-overlay svg {
+        width: 23px;
+        height: 23px;
+        display: block;
+    }
+    /* Avatar profil -- lingkaran berisi inisial username, jadi trigger
+       popover (label tombolnya sendiri = inisial, bukan overlay SVG). */
+    .st-key-nav_profile_wrap button {
+        width: 32px !important;
+        height: 32px !important;
+        min-height: 32px !important;
+        border-radius: 50% !important;
+        padding: 0 !important;
+        font-weight: 800 !important;
+        font-size: 13px !important;
+        line-height: 1 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin: 6px auto 0 auto !important;
+        box-shadow: none !important;
+        border: 2px solid rgba(255,255,255,0.18) !important;
+        background: #ff8c00 !important;
+        color: #2c1500 !important;
+    }
+    .st-key-nav_notif_slot {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        transform: scale(0.85);
+    }
+    /* Kasih ruang kosong di bawah biar konten terakhir tiap halaman
+       gak ketutup bottom nav bar yang fixed. */
+    .main .block-container,
+    [data-testid="stMainBlockContainer"] {
+        padding-bottom: 88px !important;
     }
 
     .badge-buy { background: rgba(0,224,140,0.15); color: #00e08c; }
@@ -1096,14 +1163,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<div class="orange-topbar">
-    <div class="orange-topbar-title">
-        SYARIAH SIGNAL
-    </div>
-    <div class="orange-topbar-sub">Khusus Saham Syariah, Semoga Berkah</div>
-</div>
-""", unsafe_allow_html=True)
+# CATATAN: banner judul "SYARIAH SIGNAL" + subtitle SEKARANG cuma
+# dirender di dalam render_auth_panel() (halaman login), bukan lagi
+# global di sini -- supaya di dashboard (sudah login) langsung ke
+# konten, tanpa banner besar yang makan tempat layar HP.
 
 # ============================================================
 #  AUTH / SUBSCRIPTION GATE
@@ -1249,6 +1312,15 @@ def render_auth_panel(user_db):
     # jadi trigger-nya pakai st.button asli (di-styling supaya terlihat
     # seperti link teks kecil, lihat CSS ".st-key-btn_forgot/back_login").
     st.session_state.setdefault("auth_view", "login")
+
+    st.markdown("""
+    <div class="orange-topbar">
+        <div class="orange-topbar-title">
+            SYARIAH SIGNAL
+        </div>
+        <div class="orange-topbar-sub">Khusus Saham Syariah, Semoga Berkah</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     with st.container(key="auth_wrap"):
         st.markdown('<div class="auth-logo-badge">🔐</div>', unsafe_allow_html=True)
@@ -1510,104 +1582,151 @@ def _go_to_dashboard():
     st.rerun()
 
 
-with st.container(key="header_status_bar"):
-    if status in ("owner", "active") and supabase_client:
-        col_home, col_status, col_notif, col_portfolio = st.columns([0.5, 3.3, 0.6, 1.3])
-    else:
-        col_home, col_status, col_portfolio = st.columns([0.5, 3.7, 1.3])
-        col_notif = None
+# ============================================================
+#  BOTTOM NAV BAR -- 5 ikon polos (Home, Komunitas, Portofolio,
+#  Notifikasi, Profil), fixed nempel di bawah layar, gak ikut
+#  kescroll. Menggantikan header lama yang numpuk vertikal di HP
+#  (Streamlit otomatis stack st.columns di layar sempit).
+# ============================================================
+_ICON_HOME_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M3 11.5 12 4l9 7.5"/>'
+    '<path d="M5.5 10v9a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-9"/>'
+    '<path d="M9.5 20v-6h5v6"/></svg>'
+)
+_ICON_COMMUNITY_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">'
+    '<circle cx="9" cy="8" r="3"/>'
+    '<path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/>'
+    '<circle cx="17" cy="9" r="2.3"/>'
+    '<path d="M15 19c.3-2.2 1.8-3.7 3.8-3.9"/></svg>'
+)
+_ICON_PORTFOLIO_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M3 7a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg>'
+)
+_ICON_BELL_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    'stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M6 10a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 14 6 10Z"/>'
+    '<path d="M9.5 18a2.5 2.5 0 0 0 5 0"/></svg>'
+)
 
-    with col_home:
-        if st.button("🏠", key="home_btn", use_container_width=True, help="Kembali ke Dashboard"):
+
+def _render_nav_icon(container_key, label, help_text, svg):
+    """Tombol ikon polos: teks labelnya dibikin transparan lewat CSS
+    (tetap kebaca screen-reader buat aksesibilitas), yang tampil cuma
+    SVG overlay-nya. Return True kalau diklik."""
+    with st.container(key=container_key):
+        clicked = st.button(label, key=f"{container_key}_btn", help=help_text, use_container_width=True)
+        st.markdown(f'<div class="nav-icon-overlay">{svg}</div>', unsafe_allow_html=True)
+    return clicked
+
+
+if "profile_popover_seed" not in st.session_state:
+    st.session_state["profile_popover_seed"] = 0
+_popover_key = f"profile_popover_{st.session_state['profile_popover_seed']}"
+_profile_initial = (display_name or "?").strip()[:1].upper() or "?"
+
+with st.container(key="bottom_nav_bar"):
+    nav_home, nav_community, nav_portfolio, nav_notif, nav_profile = st.columns(5)
+
+    with nav_home:
+        if _render_nav_icon("navicon_home", "Home", "Kembali ke Dashboard", _ICON_HOME_SVG):
             _go_to_dashboard()
 
-    # ---- Nama profil = trigger dropdown (popover) berisi Privasi Akun
-    # & Logout, biar gak makan tempat sebagai tombol terpisah-pisah di
-    # header. Label tombolnya sendiri sudah nunjukkin status + nama.
-    # Badge centang biru (gaya "verified" media sosial) ditaruh di KANAN
-    # nama, buat owner & pelanggan aktif -- mahkota (owner) tetap di kiri. ----
-    _verified_badge = ":blue[✔️]"
-    if status == "owner":
-        _profile_label = f"👑 {display_name} {_verified_badge}"
-    elif status == "active":
-        _profile_label = f"{display_name} {_verified_badge}"
-    else:
-        _profile_label = f"❌ {display_name}"
-
-    # PERBAIKAN: st.popover bawaan Streamlit TIDAK otomatis nutup diri
-    # sendiri kalau tombol DI DALAMNYA diklik lalu trigger st.rerun() --
-    # popover-nya kebuka lagi setelah rerun karena widget key-nya sama
-    # persis. Solusinya: kasih popover ini "key" yang berubah tiap kali
-    # ada aksi di dalamnya (Kelola Pelanggan/Privasi Akun/Logout) --
-    # Streamlit jadi menganggapnya widget baru (state awal = tertutup),
-    # jadi begitu opsi diklik, popover otomatis ketutup sendiri.
-    if "profile_popover_seed" not in st.session_state:
-        st.session_state["profile_popover_seed"] = 0
-    _popover_key = f"profile_popover_{st.session_state['profile_popover_seed']}"
-
-    with col_status:
-        with st.popover(_profile_label, use_container_width=True, key=_popover_key):
-            if status == "owner":
-                st.success("👑 Owner access granted")
-                st.divider()
-                if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
-                    st.session_state["show_customer_panel"] = True
-                    st.session_state["profile_popover_seed"] += 1
-                    st.rerun()
-            elif status == "active":
-                st.success("✅ Subscription aktif")
-                _sub_info = get_subscription_info(identifier, user_db)
-                if _sub_info and _sub_info.get("subscribed_at") and _sub_info.get("expires_at"):
-                    try:
-                        _mulai_dt = datetime.fromisoformat(_sub_info["subscribed_at"])
-                        _akhir_dt = datetime.fromisoformat(_sub_info["expires_at"])
-                        _plan_label = PLAN_LABELS.get(_sub_info["plan"], _sub_info["plan"] or "-")
-                        st.caption(
-                            f"Paket **{_plan_label}**  \n"
-                            f"Mulai: {format_tanggal_id(_mulai_dt)}  \n"
-                            f"Berakhir: {format_tanggal_id(_akhir_dt)} "
-                            f"(sisa {_sub_info['days_left']} hari)"
-                        )
-                    except (ValueError, TypeError):
-                        pass
-            else:
-                st.warning("❌ Belum berlangganan")
-            st.divider()
-            if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
-                st.session_state.active_panel = "privacy"
-                st.session_state["profile_popover_seed"] += 1
+    with nav_community:
+        if supabase_client:
+            if _render_nav_icon("navicon_community", "Komunitas", "Komunitas", _ICON_COMMUNITY_SVG):
+                st.session_state["show_portfolio"] = False
+                st.session_state["show_customer_panel"] = False
+                st.session_state["active_panel"] = "community"
                 st.rerun()
-            if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
-                st.session_state["profile_popover_seed"] += 1
-                st.session_state.pop("auth_identifier", None)
-                st.session_state.pop("auth_display_name", None)
-                clear_login_cookie()
-                # Cegah cookie lama (yang mungkin belum sempat kehapus di
-                # browser saat rerun ini terjadi) auto-login-in kita lagi.
-                # Flag ini sekarang TIDAK langsung dibuang di rerun berikutnya
-                # -- dia dipertahankan sampai kode di atas benar-benar
-                # verifikasi cookie-nya sudah kosong (lihat blok
-                # "skip_cookie_restore" di dekat pengecekan identifier).
-                # Ini penting terutama di koneksi lambat, supaya user tidak
-                # ke-auto-login lagi walau proses hapus cookie di komponen
-                # JS-nya butuh waktu lebih dari 1 kali render.
-                st.session_state["skip_cookie_restore"] = True
-                # Jeda singkat ini cuma bantuan awal (bukan jaminan) supaya
-                # komponen cookie sempat mulai proses hapus sebelum halaman
-                # di-render ulang -- verifikasi sebenarnya tetap dilakukan
-                # lewat pengecekan cookies.get() di atas.
-                with st.spinner("Logout..."):
-                    time.sleep(0.35)
-                st.rerun()
+        else:
+            # Supabase belum dikonfigurasi -- ikon tetap tampil (biar
+            # tata letak 5 kolom konsisten) tapi non-aktif/redup.
+            st.markdown(
+                f'<div style="text-align:center; opacity:0.3; padding:9px 0;">{_ICON_COMMUNITY_SVG}</div>',
+                unsafe_allow_html=True,
+            )
 
-    if col_notif is not None:
-        with col_notif:
-            render_notification_bell(supabase_client, user_id=identifier)
-    with col_portfolio:
-        if status in ("owner", "active"):
-            if st.button("📌 Portofolio Saya", use_container_width=True):
+    with nav_portfolio:
+        if _render_nav_icon("navicon_portfolio", "Portofolio Saya", "Portofolio Saya", _ICON_PORTFOLIO_SVG):
+            if status in ("owner", "active"):
                 st.session_state["show_portfolio"] = True
                 st.rerun()
+            else:
+                st.toast("Fitur Portofolio khusus pelanggan aktif. Yuk berlangganan dulu.", icon="⚠️")
+
+    with nav_notif:
+        with st.container(key="nav_notif_slot"):
+            if supabase_client:
+                render_notification_bell(supabase_client, user_id=identifier)
+            else:
+                st.markdown(
+                    f'<div style="text-align:center; opacity:0.3; padding:9px 0;">{_ICON_BELL_SVG}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    with nav_profile:
+        with st.container(key="nav_profile_wrap"):
+            with st.popover(_profile_initial, use_container_width=True, key=_popover_key):
+                st.markdown(f"**{display_name}**")
+                if status == "owner":
+                    st.success("👑 Owner access granted")
+                    st.divider()
+                    if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
+                        st.session_state["show_customer_panel"] = True
+                        st.session_state["profile_popover_seed"] += 1
+                        st.rerun()
+                elif status == "active":
+                    st.success("✅ Subscription aktif")
+                    _sub_info = get_subscription_info(identifier, user_db)
+                    if _sub_info and _sub_info.get("subscribed_at") and _sub_info.get("expires_at"):
+                        try:
+                            _mulai_dt = datetime.fromisoformat(_sub_info["subscribed_at"])
+                            _akhir_dt = datetime.fromisoformat(_sub_info["expires_at"])
+                            _plan_label = PLAN_LABELS.get(_sub_info["plan"], _sub_info["plan"] or "-")
+                            st.caption(
+                                f"Paket **{_plan_label}**  \n"
+                                f"Mulai: {format_tanggal_id(_mulai_dt)}  \n"
+                                f"Berakhir: {format_tanggal_id(_akhir_dt)} "
+                                f"(sisa {_sub_info['days_left']} hari)"
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                else:
+                    st.warning("❌ Belum berlangganan")
+                st.divider()
+                if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
+                    st.session_state.active_panel = "privacy"
+                    st.session_state["profile_popover_seed"] += 1
+                    st.rerun()
+                if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                    st.session_state["profile_popover_seed"] += 1
+                    st.session_state.pop("auth_identifier", None)
+                    st.session_state.pop("auth_display_name", None)
+                    clear_login_cookie()
+                    # Cegah cookie lama (yang mungkin belum sempat kehapus di
+                    # browser saat rerun ini terjadi) auto-login-in kita lagi.
+                    # Flag ini sekarang TIDAK langsung dibuang di rerun berikutnya
+                    # -- dia dipertahankan sampai kode di atas benar-benar
+                    # verifikasi cookie-nya sudah kosong (lihat blok
+                    # "skip_cookie_restore" di dekat pengecekan identifier).
+                    # Ini penting terutama di koneksi lambat, supaya user tidak
+                    # ke-auto-login lagi walau proses hapus cookie di komponen
+                    # JS-nya butuh waktu lebih dari 1 kali render.
+                    st.session_state["skip_cookie_restore"] = True
+                    # Jeda singkat ini cuma bantuan awal (bukan jaminan) supaya
+                    # komponen cookie sempat mulai proses hapus sebelum halaman
+                    # di-render ulang -- verifikasi sebenarnya tetap dilakukan
+                    # lewat pengecekan cookies.get() di atas.
+                    with st.spinner("Logout..."):
+                        time.sleep(0.35)
+                    st.rerun()
 
 # ---- Banner soft: sisa masa aktif <=3 hari ----
 # Sengaja diletakkan di sini (segera setelah header, SEBELUM percabangan
