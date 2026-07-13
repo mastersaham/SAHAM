@@ -813,16 +813,36 @@ st.markdown("""
        st.columns jadi vertikal kalau layar sempit (HP); supaya TETAP
        satu baris, flex-wrap dipaksa "nowrap" + tiap kolom dipaksa
        flex-shrink lewat CSS di bawah ini.
-    --------------------------------------------------------- */
+
+       PERBAIKAN (bar "kepotong"/nongol di tengah, bukan nempel bawah
+       layar beneran): `position: fixed` itu seharusnya selalu nempel
+       ke JENDELA BROWSER -- KECUALI ada elemen pembungkus (parent) di
+       atasnya yang punya CSS `transform` (atau filter/perspective).
+       Streamlit sering kasih `transform` ke pembungkus utamanya buat
+       animasi -- begitu itu kejadian, `fixed` jadi nempel ke
+       pembungkus itu, bukan ke layar, makanya bar-nya kelihatan
+       "ketelen"/salah tempat. Baris-baris di bawah ini reset paksa
+       transform di pembungkus-pembungkus utama Streamlit supaya
+       `fixed` kembali nempel ke layar beneran. */
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"],
+    [data-testid="stMainBlockContainer"],
+    section.main,
+    .main {
+        transform: none !important;
+        filter: none !important;
+        perspective: none !important;
+    }
     .st-key-bottom_nav_bar {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 9999;
+        position: fixed !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        top: auto !important;
+        z-index: 999999 !important;
         background: linear-gradient(180deg, rgba(28,16,6,0.92), rgba(8,5,2,0.98));
         border-top: 1px solid rgba(255,170,60,0.25);
-        padding: 6px 8px calc(6px + env(safe-area-inset-bottom)) 8px;
+        padding: 6px 8px calc(10px + env(safe-area-inset-bottom)) 8px;
         backdrop-filter: blur(10px);
     }
     .st-key-bottom_nav_bar [data-testid="stHorizontalBlock"] {
@@ -1596,12 +1616,14 @@ _ICON_HOME_SVG = (
     '<path d="M9.5 20v-6h5v6"/></svg>'
 )
 _ICON_COMMUNITY_SVG = (
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
     'stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">'
-    '<circle cx="9" cy="8" r="3"/>'
-    '<path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/>'
-    '<circle cx="17" cy="9" r="2.3"/>'
-    '<path d="M15 19c.3-2.2 1.8-3.7 3.8-3.9"/></svg>'
+    '<circle cx="12" cy="6.3" r="2.3"/>'
+    '<path d="M7.5 14.5c0-2.6 2-4.3 4.5-4.3s4.5 1.7 4.5 4.3"/>'
+    '<circle cx="4.3" cy="9.3" r="1.8"/>'
+    '<path d="M1.2 16.3c.1-2.1 1.5-3.5 3.1-3.6"/>'
+    '<circle cx="19.7" cy="9.3" r="1.8"/>'
+    '<path d="M19.7 12.7c1.6.1 3 1.5 3.1 3.6"/></svg>'
 )
 _ICON_PORTFOLIO_SVG = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
