@@ -3101,17 +3101,24 @@ def render_top_panel():
 
         def _gainer_loser_label(r):
             """Label singkat status gainer/loser, gabungan trend+bandar+
-            signal+fake_breakout yang UDAH ADA di scan_df (belum termasuk
-            foreign flow -- itu masih terkunci, lihat panel Broker Summary).
-            bandar itu snapshot HARI INI aja (volume spike + arah harga),
-            bukan pola akumulasi/distribusi multi-hari."""
+            signal+fake_breakout+climax_risk+weak_close yang UDAH ADA di
+            scan_df (belum termasuk foreign flow -- itu masih terkunci,
+            lihat panel Broker Summary). bandar itu snapshot HARI INI aja
+            (volume spike + arah harga), bukan pola akumulasi/distribusi
+            multi-hari. climax_risk & weak_close BUKAN prediksi gap besok
+            pagi -- cuma baca kelemahan closing hari ini (upper/lower wick
+            + volume), bukan jaminan."""
             chg = r.get("change_pct", 0) or 0
             bandar = str(r.get("bandar", "NETRAL"))
             trend = str(r.get("trend", ""))
             sig = str(r.get("signal", ""))
             fake_break = bool(r.get("fake_breakout", False))
+            climax_risk = bool(r.get("climax_risk", False))
+            weak_close = bool(r.get("weak_close", False))
 
             if chg >= 0:
+                if climax_risk:
+                    return "gl-bad", "🔴 Rawan Anjlok"
                 if fake_break:
                     return "gl-warn", "🟠 Hati-hati Bantingan"
                 if "MARKUP" in bandar and "BUY" in sig:
@@ -3119,9 +3126,11 @@ def render_top_panel():
                 if "NETRAL" in bandar and ("SELL" in sig or "HOLD" in sig):
                     return "gl-caution", "🟡 Naik Tanpa Volume"
                 if "Bearish" in trend:
-                    return "gl-caution", "🟡 Rawan Reversal"
+                    return "gl-warn", "🟠 Rawan Balik Turun"
                 return "gl-neutral", "⚪ Pantau"
             else:
+                if weak_close:
+                    return "gl-bad", "🔴 Rawan Lanjut Turun"
                 if "DISTRIBUSI" in bandar and "SELL" in sig:
                     return "gl-bad", "🔴 Tekanan Jual"
                 if "NETRAL" in bandar and "Bullish" in trend and ("BUY" in sig or "HOLD" in sig):

@@ -480,6 +480,51 @@ def fake_breakout_detector(df):
     return df['Close'].iloc[-2] > prior_resistance and df['Close'].iloc[-1] < prior_resistance
 
 
+def climax_top_risk(df, gain_threshold=15.0, vol_multiplier=2.5, wick_ratio=0.4):
+    """Gainer 'klimaks': naik ekstrem hari ini + volume klimaks (bukan
+    sekadar spike biasa) + upper wick panjang (closing ketarik turun jauh
+    dari titik tertinggi hari itu, tanda ada tekanan jual besar pas harga
+    di puncak). Kombinasi ini ciri khas 'pump' yang rawan lanjut ARB atau
+    koreksi tajam di sesi berikutnya -- BUKAN prediksi gap besok pagi,
+    cuma baca kelemahan closing hari ini."""
+    if len(df) < 11:
+        return False
+    chg = pct_change(df)
+    if chg < gain_threshold:
+        return False
+    vol_avg = df['Volume'].rolling(10).mean().iloc[-1]
+    if vol_avg <= 0 or df['Volume'].iloc[-1] < vol_avg * vol_multiplier:
+        return False
+    today_high = df['High'].iloc[-1]
+    today_low = df['Low'].iloc[-1]
+    today_close = df['Close'].iloc[-1]
+    day_range = today_high - today_low
+    if day_range <= 0:
+        return False
+    upper_wick = (today_high - today_close) / day_range
+    return upper_wick >= wick_ratio
+
+
+def weak_close_risk(df, close_pos_threshold=0.15):
+    """Closing lemah: harga tutup deket banget sama titik terendah hari
+    itu (nyaris gak ada recovery sampe bel tutup) + volume gede -- ciri
+    seller masih pegang kendali pas market tutup, rawan lanjut turun di
+    sesi berikutnya. Sama kayak climax_top_risk, ini BUKAN prediksi gap,
+    cuma baca posisi closing relatif ke range harian."""
+    if len(df) < 11:
+        return False
+    if not volume_spike(df):
+        return False
+    today_high = df['High'].iloc[-1]
+    today_low = df['Low'].iloc[-1]
+    today_close = df['Close'].iloc[-1]
+    day_range = today_high - today_low
+    if day_range <= 0:
+        return False
+    close_pos = (today_close - today_low) / day_range
+    return close_pos <= close_pos_threshold
+
+
 # ------------------------------------------------------------
 # Download data (dibagi per-batch supaya RAM tidak melonjak dan
 # proses tidak mati / segmentation fault seperti sebelumnya)
@@ -537,6 +582,8 @@ def build_full_scan(stocks=None):
             entry, tp, sl = entry_exit(df, support, resistance)
             bandar = bandar_detection(df)
             fake_break = fake_breakout_detector(df)
+            climax_risk = climax_top_risk(df)
+            weak_close = weak_close_risk(df)
             change_pct = pct_change(df)
             week_change_pct = pct_change_week(df)
             results.append({
@@ -554,6 +601,8 @@ def build_full_scan(stocks=None):
                 "drop": round(float(drop), 2),
                 "bandar": bandar,
                 "fake_breakout": bool(fake_break),
+                "climax_risk": bool(climax_risk),
+                "weak_close": bool(weak_close),
             })
         except Exception:
             continue
