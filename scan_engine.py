@@ -615,7 +615,13 @@ def get_daily_history(ticker):
 def get_intraday_history(ticker):
     """Return list of dict [{date, open, high, low, close, volume}, ...],
     atau None kalau gagal / tidak tersedia (saham ilikuid kadang tidak
-    punya data intraday granular dari Yahoo)."""
+    punya data intraday granular dari Yahoo).
+
+    CATATAN: fungsi ini masih dipertahankan (dipakai app utama kalau
+    suatu saat butuh fetch 1 saham on-demand), tapi scan_worker.py
+    SUDAH TIDAK pakai ini lagi untuk universe besar -- pakai
+    get_intraday_batch() di bawah supaya jauh lebih cepat (1 request
+    per batch 60 saham, bukan 1 request per saham)."""
     try:
         df = yf.Ticker(ticker).history(period="5d", interval="5m", auto_adjust=True)
         if df is None or df.empty:
@@ -629,6 +635,57 @@ def get_intraday_history(ticker):
         return df[cols].round({"open": 2, "high": 2, "low": 2, "close": 2}).to_dict(orient="records")
     except Exception:
         return None
+
+
+def get_intraday_batch(tickers, batch_size: int = 60):
+    """Versi batch dari get_intraday_history() -- 1 request yf.download
+    per batch (bukan 1 request per saham), sama polanya dengan
+    get_all_data()/get_quick_quotes(). Jauh lebih cepat untuk universe
+    besar (~900 saham), tapi kalau 1 batch gagal total (network/Yahoo
+    error), SELURUH saham di batch itu ikut ke-skip untuk run ini
+    (beda dengan versi per-saham yang isolasi kegagalannya per saham).
+
+    Return dict {ticker: [{date, open, high, low, close, volume}, ...]}
+    -- ticker yang gagal/tidak ada datanya cukup tidak muncul di dict
+    (dicek di run_intraday dengan .get())."""
+    tickers = list(dict.fromkeys(tickers))  # dedupe, jaga urutan
+    out = {}
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i:i + batch_size]
+        try:
+            raw = yf.download(
+                batch,
+                period="5d",
+                interval="5m",
+                progress=False,
+                group_by="ticker",
+                threads=True,
+                auto_adjust=True,
+            )
+        except Exception:
+            continue
+
+        for t in batch:
+            try:
+                df = raw if len(batch) == 1 else raw[t]
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df = df.dropna(subset=["Close", "Open", "High", "Low", "Volume"])
+                if df.empty:
+                    continue
+                df = df.reset_index()
+                date_col = "Datetime" if "Datetime" in df.columns else "Date"
+                df = df.rename(columns={date_col: "date", "Open": "open", "High": "high",
+                                         "Low": "low", "Close": "close", "Volume": "volume"})
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+                cols = ["date", "open", "high", "low", "close", "volume"]
+                out[t] = df[cols].round({"open": 2, "high": 2, "low": 2, "close": 2}).to_dict(orient="records")
+            except Exception:
+                continue
+
+        del raw
+
+    return out
 
 
 # ============================================================

@@ -112,18 +112,22 @@ def run_main_scan(client, issi_stocks):
     print(f"  scan_results: {len(records)} saham OK.")
 
 
-def run_intraday(client, universe):
+def run_intraday(client, universe, batch_size=60):
     """Candle 5 menit, ~5 hari terakhir -- basis grafik '1 Hari' & '1
-    Minggu' di app. Jalan TIAP kali (biar tetap kerasa 'baru')."""
+    Minggu' di app. Jalan TIAP kali (biar tetap kerasa 'baru').
+
+    Pakai get_intraday_batch() (1 request per 60 saham) bukan lagi
+    get_intraday_history() satu-satu per saham -- jauh lebih cepat
+    untuk universe ~900 saham. Trade-off: kalau 1 batch gagal total
+    (network/Yahoo error), 60 saham di batch itu ikut ke-skip untuk
+    run ini (bukan cuma 1 saham) -- tapi run berikutnya (15 menit
+    lagi) akan coba lagi seperti biasa."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows = []
-    for i, ticker in enumerate(universe):
-        data = se.get_intraday_history(ticker)
-        if data:
-            rows.append({"ticker": ticker, "data": data, "updated_at": now_iso})
-        if (i + 1) % 50 == 0:
-            print(f"  intraday: {i + 1}/{len(universe)} saham diproses...")
-        time.sleep(0.05)
+    data_by_ticker = se.get_intraday_batch(universe, batch_size=batch_size)
+    rows = [
+        {"ticker": ticker, "data": data, "updated_at": now_iso}
+        for ticker, data in data_by_ticker.items()
+    ]
     sent = upsert_chunks(client, "stock_intraday", rows, on_conflict="ticker")
     print(f"  stock_intraday: {sent}/{len(universe)} saham OK.")
 
