@@ -528,7 +528,7 @@ st.markdown("""
        kecilkan supaya halaman pembuka nggak keliatan "ngambang". */
     div[data-testid="stAppViewBlockContainer"],
     .block-container {
-        padding-top: 2.2rem !important;
+        padding-top: 5.6rem !important; /* ruang buat header (2 baris) yang sekarang fixed */
         padding-bottom: 5rem !important; /* ruang buat bottom bar Komunitas yang fixed */
     }
 
@@ -715,12 +715,15 @@ st.markdown("""
        (home = ikon, 4 kategori = teks label, tanpa ikon).
     --------------------------------------------------------- */
     .st-key-header_status_bar {
-        position: sticky;
+        position: fixed;
         top: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
         z-index: 999;
-        background: linear-gradient(135deg, #ffc25c, #ff8a1f);
-        padding: 10px 12px 8px 12px;
-        margin: -10px -4px 0 -4px;
+        background: #ff8c00;
+        padding: 6px 12px 4px 12px;
+        margin: 0;
         box-shadow: 0 6px 18px -12px rgba(0,0,0,0.55);
     }
     /* PERBAIKAN: Streamlit otomatis nge-stack st.columns jadi vertikal
@@ -745,9 +748,9 @@ st.markdown("""
        teks gelap biar kontras di atas latar oranye */
     .app_brand_name {
         font-weight: 800;
-        font-size: 16.5px;
+        font-size: 21px;
         color: #1a0f00;
-        line-height: 38px;
+        line-height: 34px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -755,26 +758,27 @@ st.markdown("""
     /* tombol ikon polos (portofolio, notif) di baris 1 -- transparan,
        cuma ikon gelap, tanpa kotak/border supaya ringkas */
     .st-key-header_status_bar div.stButton > button {
-        background: transparent !important;
+        background: #1a0f00 !important;
         border: none !important;
+        border-radius: 8px !important;
         box-shadow: none !important;
-        color: #1a0f00 !important;
-        font-size: 18px !important;
-        padding: 0.3em !important;
+        color: #ff8c00 !important;
+        font-size: 16px !important;
+        padding: 0.3em 0.5em !important;
         min-width: 0 !important;
     }
     /* avatar bulat (trigger popover profil) berisi inisial nama */
     .st-key-profile_avatar_wrap div[data-testid="stPopover"] button {
         background: #1a0f00 !important;
-        color: #ffb35a !important;
+        color: #ff8c00 !important;
         font-weight: 800 !important;
         font-size: 13px !important;
         border-radius: 50% !important;
-        width: 38px !important;
-        height: 38px !important;
-        min-width: 38px !important;
+        width: 34px !important;
+        height: 34px !important;
+        min-width: 34px !important;
         padding: 0 !important;
-        border: 2px solid rgba(255,255,255,0.55) !important;
+        border: none !important;
         box-shadow: none !important;
         display: flex !important;
         align-items: center !important;
@@ -784,27 +788,27 @@ st.markdown("""
     /* baris 2: nav -- home tetap ikon, 4 kategori jadi teks label,
        semua di atas strip oranye yang menyambung dari baris 1 */
     .st-key-nav_icon_row {
-        background: linear-gradient(135deg, #ffb84d, #ff7e1f);
-        padding: 6px 10px 10px 10px;
-        margin: 0 -4px 10px -4px;
-        border-top: 1px solid rgba(0,0,0,0.08);
+        background: #ff8c00;
+        padding: 3px 10px 5px 10px;
+        margin: 4px -12px -4px -12px;
+        border-top: 1px solid rgba(0,0,0,0.12);
     }
     .st-key-nav_icon_row div.stButton > button,
     .st-key-nav_icon_row div[data-testid="stPopover"] button {
-        background: rgba(26,15,0,0.10) !important;
-        color: #1a0f00 !important;
+        background: #1a0f00 !important;
+        color: #ff8c00 !important;
         font-weight: 700 !important;
         font-size: 12px !important;
-        border-radius: 10px !important;
+        border-radius: 8px !important;
         border: none !important;
         box-shadow: none !important;
-        padding: 0.5em 0.2em !important;
+        padding: 0.4em 0.2em !important;
         min-width: 0 !important;
     }
-    /* kolom pertama (Home) -- cuma ikon, sedikit ditonjolkan */
+    /* kolom pertama (Home) -- ikon, warna seragam sama tombol lain */
     .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
-        font-size: 18px !important;
-        background: rgba(26,15,0,0.16) !important;
+        font-size: 16px !important;
+        background: #1a0f00 !important;
     }
     /* isi popover kategori (sub-menu): tombol biasa, full width, rapi */
     div[data-testid="stPopoverBody"] div.stButton > button {
@@ -816,7 +820,7 @@ st.markdown("""
         position: fixed;
         left: 0; right: 0; bottom: 0;
         z-index: 998;
-        background: linear-gradient(135deg, #ffc25c, #ff8a1f);
+        background: #ff8c00;
         padding: 8px 16px calc(8px + env(safe-area-inset-bottom, 0px)) 16px;
         box-shadow: 0 -10px 24px -10px rgba(0,0,0,0.55);
     }
@@ -1096,12 +1100,6 @@ st.markdown("""
         text-align: left;
     }
 </style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="orange-topbar">
-    <span class="orange-topbar-title-mini">Syariah Signal</span>
-</div>
 """, unsafe_allow_html=True)
 
 # ============================================================
@@ -1555,7 +1553,7 @@ with st.container(key="header_status_bar"):
     col_brand, col_portfolio, col_notif, col_avatar = st.columns([3.4, 0.55, 0.55, 0.7])
 
     with col_brand:
-        st.markdown('<div class="app_brand_name">💹 Saham Syariah</div>', unsafe_allow_html=True)
+        st.markdown('<div class="app_brand_name">Saham Syariah</div>', unsafe_allow_html=True)
 
     with col_portfolio:
         if is_subscriber:
