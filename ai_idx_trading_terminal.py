@@ -1,17 +1,12 @@
 import streamlit as st
 import json
 import os
-import re
 import html
 import hashlib
 import secrets as secrets_lib
 import requests
 import time
-import gc
-import numpy as np
-import xml.etree.ElementTree as ET
 import pandas as pd
-import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
@@ -80,37 +75,13 @@ TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", "ISI_TOKEN_LO")
 TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "ISI_CHAT_ID_LO")
 
 # ============================================================
-#  GOAPI.IO — dipakai KHUSUS untuk fitur "Broker Summary" (kode
-#  broker + volume beli/jual per saham per hari). Ini data yang
-#  TIDAK tersedia gratis di yfinance/IDX resmi, tapi GOAPI.IO
-#  punya endpoint khusus untuk ini di paket gratisnya (kuota
-#  terbatas, cukup untuk update 1x/hari setelah bursa tutup).
-#
-#  Daftar akun gratis + ambil API key di: https://app.goapi.io
-#
-#  PENTING — WAJIB DICEK MANUAL SEBELUM DIPAKAI:
-#  Dokumentasi endpoint GOAPI (goapi.io/docs) ada di balik login,
-#  jadi path URL & format auth header di bawah ini adalah pola
-#  paling umum dipakai REST API sejenis (base URL "api.goapi.io"
-#  dikonfirmasi dari SDK resmi mereka). Setelah kamu daftar dan
-#  login ke dashboard GOAPI, buka tab "Docs" -> cari endpoint
-#  "Broker Summary", lalu cocokkan/ganti GOAPI_BROKER_ENDPOINT_TEMPLATE
-#  dan header di fetch_broker_summary() kalau ternyata beda.
-#  (Update: path & header di bawah sudah disesuaikan ke
-#  /v1/stock/idx/{symbol}/broker_summary + header X-API-KEY,
-#  hasil verifikasi manual terhadap dokumentasi GOAPI.)
-GOAPI_API_KEY = st.secrets.get("GOAPI_API_KEY", "ISI_API_KEY_GOAPI_LO")
-GOAPI_BASE_URL = "https://api.goapi.io"
-# Endpoint pakai path parameter (bukan query param) untuk kode saham:
-# https://api.goapi.io/v1/stock/idx/{symbol}/broker_summary?date=YYYY-MM-DD
-GOAPI_BROKER_ENDPOINT_TEMPLATE = GOAPI_BASE_URL + "/v1/stock/idx/{symbol}/broker_summary"
-# Endpoint histori harga & fundamental GOAPI (WADAH — path di bawah ini
-# perkiraan mengikuti pola endpoint broker_summary di atas; cek dokumentasi
-# GOAPI kamu dan sesuaikan kalau ternyata beda, lalu isi
-# _fetch_history_goapi() / _fetch_fundamentals_goapi() di bagian halaman
-# detail saham).
-GOAPI_HISTORY_ENDPOINT_TEMPLATE = GOAPI_BASE_URL + "/v1/stock/idx/{symbol}/history"
-GOAPI_FUNDAMENTAL_ENDPOINT_TEMPLATE = GOAPI_BASE_URL + "/v1/stock/idx/{symbol}/fundamental"
+#  GOAPI.IO — CATATAN: app ini TIDAK LAGI manggil GOAPI langsung.
+#  Broker Summary sekarang dibaca dari tabel `broker_summary` di
+#  Supabase, diisi 1x/hari oleh scan_worker.py (jalan di GitHub
+#  Actions). Kalau mau setup/ganti API key GOAPI, isi di GitHub
+#  Actions Secrets (GOAPI_API_KEY), BUKAN di Streamlit Secrets --
+#  app ini sudah tidak butuh key itu sama sekali.
+# ============================================================
 
 # Kunci rahasia buat enkripsi cookie sesi login. GANTI ini dengan string acak
 # panjang punya kamu sendiri (taruh di .streamlit/secrets.toml sebagai
@@ -456,69 +427,29 @@ def get_issi_stocks():
 ISSI_STOCKS, _issi_live = get_issi_stocks()
 
 # ============================================================
-#  NEWS FETCHING (Google News RSS per saham + sentimen keyword)
+#  NEWS — dibaca dari Supabase (diisi scan_worker.py via Google News
+#  RSS + sentimen keyword, lihat scan_engine.py)
 # ============================================================
-# Sumber berita: Google News RSS search, per saham. Ini dipakai (bukan RSS
-# portal lokal seperti Kontan) karena formatnya publik, terdokumentasi, dan
-# stabil: https://news.google.com/rss/search?q=<query>&hl=id&gl=ID&ceid=ID:id
-GOOGLE_NEWS_RSS_BASE = "https://news.google.com/rss/search"
 
-# Kata kunci sederhana untuk menilai sentimen berita. Ini pendekatan
-# berbasis kata kunci (bukan AI/NLP model), jadi masih bisa kurang akurat
-# untuk kalimat yang ambigu atau bernada sarkasme.
-POSITIVE_KEYWORDS = [
-    "naik", "menguat", "profit", "laba", "untung", "melesat", "rekor",
-    "akuisisi", "ekspansi", "dividen", "buyback", "tumbuh", "positif",
-    "melonjak", "meningkat", "surplus", "upgrade",
-]
-NEGATIVE_KEYWORDS = [
-    "turun", "melemah", "rugi", "anjlok", "gugatan", "delisting",
-    "penurunan", "downgrade", "default", "phk", "bangkrut", "negatif",
-    "tersendat", "tertekan", "net sell", "koreksi",
-]
-
-
-@st.cache_data(ttl=900, show_spinner=False)  # PERBAIKAN: 55d -> 15m, samain cadence & shared ke semua user
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_stock_news(ticker, query, max_items=5):
-    params = {"q": query, "hl": "id", "gl": "ID", "ceid": "ID:id"}
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; AITradingTerminal/1.0)"}
-    articles = []
+    """Berita untuk 1 saham -- dibaca dari tabel `stock_news` di Supabase
+    (diisi 1x/hari oleh scan_worker.py lewat Google News RSS, sentimen
+    juga sudah dihitung di server). Parameter `query` dipertahankan di
+    signature biar pemanggil lama tidak perlu diubah, tapi sudah tidak
+    dipakai untuk fetch (data sudah tersimpan per-ticker)."""
     try:
-        resp = requests.get(GOOGLE_NEWS_RSS_BASE, params=params, headers=headers, timeout=8)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-        for item in root.findall(".//item")[:max_items]:
-            title = html.unescape((item.findtext("title") or "").strip())
-            link = (item.findtext("link") or "").strip()
-            description = (item.findtext("description") or "").strip()
-            description = html.unescape(re.sub("<[^<]+?>", "", description))
-            pub_date = (item.findtext("pubDate") or "").strip()
-            source_el = item.find("source")
-            source = (source_el.text or "").strip() if source_el is not None else ""
-            articles.append({
-                "title": title,
-                "link": link,
-                "description": description,
-                "pub_date": pub_date,
-                "source": source,
-            })
-    except (requests.RequestException, ET.ParseError):
-        # Kalau Google News lagi tidak bisa diakses/timeout, kembalikan list
-        # kosong untuk saham ini daripada bikin seluruh app error.
-        pass
-    return articles
-
-
-def analyze_sentiment(text):
-    text_lower = text.lower()
-    pos_hits = sum(1 for kw in POSITIVE_KEYWORDS if kw in text_lower)
-    neg_hits = sum(1 for kw in NEGATIVE_KEYWORDS if kw in text_lower)
-    if pos_hits > neg_hits:
-        return "POSITIF", "🟢"
-    elif neg_hits > pos_hits:
-        return "NEGATIF", "🔴"
-    else:
-        return "NETRAL", "⚪"
+        res = (
+            supabase_client.table("stock_news")
+            .select("title, link, description, pub_date, source, sentiment, sentiment_emoji")
+            .eq("ticker", ticker)
+            .order("fetched_at", desc=True)
+            .limit(max_items)
+            .execute()
+        )
+        return res.data or []
+    except Exception:
+        return []
 
 
 def parse_pub_date(pub_date_str):
@@ -533,8 +464,10 @@ def parse_pub_date(pub_date_str):
 
 
 def get_all_stock_news(stock_queries, max_items_per_stock=5):
-    """Ambil berita untuk tiap saham di stock_queries, tandai sentimennya,
-    lalu gabungkan semua dan urutkan dari yang paling baru.
+    """Ambil berita untuk tiap saham di stock_queries (sentimen sudah
+    dihitung di server pas disimpan ke Supabase, jadi di sini tinggal
+    tag saham asalnya), lalu gabungkan semua dan urutkan dari yang
+    paling baru.
 
     Dipanggil dengan daftar dinamis: gabungan saham portofolio user (yang
     syariah) + top saham hasil scan. Lihat render_news_section() di bawah,
@@ -544,57 +477,31 @@ def get_all_stock_news(stock_queries, max_items_per_stock=5):
     for ticker, query in stock_queries.items():
         articles = fetch_stock_news(ticker, query, max_items_per_stock)
         for article in articles:
-            combined_text = f"{article['title']} {article['description']}"
-            sentiment, emoji = analyze_sentiment(combined_text)
-            all_news.append({
-                **article,
-                "matched_stocks": [ticker],
-                "sentiment": sentiment,
-                "sentiment_emoji": emoji,
-            })
+            all_news.append({**article, "matched_stocks": [ticker]})
     all_news.sort(key=lambda a: parse_pub_date(a["pub_date"]), reverse=True)
     return all_news
 
 
-# Kata kunci untuk tab "🌐 Umum" -- berita ekonomi/kebijakan Indonesia yang
-# berpotensi menggerakkan IHSG secara luas (bukan spesifik satu saham).
-# Pidato/kebijakan Presiden Prabowo dipantau khusus karena sering jadi
-# pemicu sentimen pasar.
-GENERAL_NEWS_QUERIES = [
-    "IHSG",
-    "Prabowo ekonomi",
-    "Prabowo pidato",
-    "kebijakan ekonomi Indonesia",
-    "Bank Indonesia suku bunga",
-    "rupiah",
-]
-
-
-@st.cache_data(ttl=900, show_spinner=False)  # PERBAIKAN: 55d -> 15m, samain cadence & shared ke semua user
+@st.cache_data(ttl=900, show_spinner=False)
 def get_general_market_news(max_items_per_query=5):
-    """Ambil berita ekonomi/IHSG umum (tidak terikat saham tertentu) dari
-    beberapa kata kunci di GENERAL_NEWS_QUERIES, gabungkan, buang duplikat
-    (link sama muncul dari >1 kata kunci), urutkan dari yang paling baru."""
-    all_news = []
-    seen_links = set()
-    for query in GENERAL_NEWS_QUERIES:
-        articles = fetch_stock_news(query, query, max_items_per_query)
-        for article in articles:
-            link = article.get("link", "")
-            if link and link in seen_links:
-                continue
-            if link:
-                seen_links.add(link)
-            combined_text = f"{article['title']} {article['description']}"
-            sentiment, emoji = analyze_sentiment(combined_text)
-            all_news.append({
-                **article,
-                "matched_stocks": [],
-                "sentiment": sentiment,
-                "sentiment_emoji": emoji,
-            })
-    all_news.sort(key=lambda a: parse_pub_date(a["pub_date"]), reverse=True)
-    return all_news
+    """Berita ekonomi/IHSG umum (tidak terikat saham tertentu) -- dibaca
+    dari tabel `stock_news` di Supabase dengan ticker='GENERAL' (diisi
+    scan_worker.py dari beberapa kata kunci ekonomi/kebijakan Indonesia,
+    dedupe by link sudah dilakukan di server)."""
+    try:
+        res = (
+            supabase_client.table("stock_news")
+            .select("title, link, description, pub_date, source, sentiment, sentiment_emoji")
+            .eq("ticker", "GENERAL")
+            .order("fetched_at", desc=True)
+            .limit(30)
+            .execute()
+        )
+        all_news = [{**a, "matched_stocks": []} for a in (res.data or [])]
+        all_news.sort(key=lambda a: parse_pub_date(a["pub_date"]), reverse=True)
+        return all_news
+    except Exception:
+        return []
 
 
 # ============================================================
@@ -1213,12 +1120,16 @@ def add_to_portfolio(user_db, identifier, code):
 
     # Validasi: kodenya beneran ada datanya di bursa (baik ISSI maupun
     # bukan) sebelum diterima, supaya tidak nyimpen kode saham ngaco.
+    # Dicek dari data yang SUDAH ADA di Supabase (diisi scan_worker.py,
+    # yang scan SEMUA saham IDX) -- bukan panggilan live ke yfinance.
+    # Konsekuensi: saham yang baru IPO dan belum sempat ke-scan (maks
+    # ~15 menit sekali) untuk sementara tidak akan lolos validasi ini.
     ticker_jk = f"{code}.JK"
     is_syariah = ticker_jk in ISSI_STOCKS
     if not is_syariah:
-        quote = get_quick_quote(ticker_jk)
+        quote = get_quick_quote_cached(ticker_jk)
         if quote is None:
-            return False, f"Kode saham '{code}' tidak ditemukan / tidak ada datanya."
+            return False, f"Kode saham '{code}' tidak ditemukan / belum ada datanya."
 
     portfolio.append(code)
     save_user_db(user_db)
@@ -1637,9 +1548,7 @@ if status not in ("owner", "active"):
 # atau nge-freeze bagian lain dari halaman sama sekali. Butuh streamlit >= 1.33.
 #
 # PERBAIKAN (kecepatan): data pusat (yfinance untuk .JK) baru berubah tiap
-# ~15 menit, jadi auto-refresh disamakan jadi 15 menit (bukan 30-60 detik lagi)
-# — dikombinasikan dengan batch-download di get_all_data() di bawah, refresh
-# jadi jauh lebih cepat dan tidak lagi kerasa lama.
+# ~15 menit, jadi auto-refresh disamakan jadi 15 menit (bukan 30-60 detik lagi).
 #
 # CATATAN: tidak ada lagi kontrol auto-refresh/refresh manual di sidebar.
 # Data sudah diperbarui otomatis di belakang layar oleh sistem pusat
@@ -1653,98 +1562,9 @@ manual_refresh_clicked = False
 # ============================================================
 #  DATA + INDIKATOR TEKNIKAL
 # ============================================================
-# PERBAIKAN (kecepatan): sebelumnya tiap saham di-download SATU-SATU secara
-# berurutan (get_data dipanggil ~600x dalam loop for), jadi build_full_scan
-
-# bisa makan waktu bermenit-menit. Sekarang semua ticker diambil dalam SATU
-# panggilan yf.download (threads=True bikin yfinance download banyak ticker
-# sekaligus secara paralel di background), jauh lebih cepat.
-@st.cache_data(ttl=60, show_spinner=False)
-def get_all_data(stocks_tuple):
-    """Download data semua saham, TAPI dibagi jadi kelompok kecil (batch)
-    biar RAM tidak numpuk sekaligus -- sebelumnya semua ~600 saham
-    di-download dalam satu panggilan yf.download, ini bikin memori
-    server melonjak drastis dan proses mati (segmentation fault) di
-    Streamlit Cloud (jatah RAM terbatas). Sekarang diproses per-batch,
-    dan hasil mentah tiap batch langsung dibuang dari memori (gc.collect)
-    sebelum lanjut ke batch berikutnya."""
-    stocks = list(stocks_tuple)
-    BATCH_SIZE = 60
-    data = {}
-
-    for i in range(0, len(stocks), BATCH_SIZE):
-        batch = stocks[i:i + BATCH_SIZE]
-        try:
-            raw = yf.download(
-                batch,
-                period="3mo",
-                interval="1d",
-                progress=False,
-                group_by="ticker",
-                threads=True,
-                auto_adjust=True,
-            )
-        except Exception:
-            continue
-
-        for stock in batch:
-            try:
-                if len(batch) == 1:
-                    df = raw
-                else:
-                    df = raw[stock]
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                df = df.dropna(subset=["Close", "Open", "High", "Low", "Volume"])
-                if len(df) >= 30:
-                    data[stock] = df
-            except Exception:
-                continue
-
-        del raw
-        gc.collect()
-
-    return data
-
-
 def _display_ticker(t):
     """Buang suffix .JK biar tampilan UI cukup nama sahamnya aja, mis. DEWA.JK -> DEWA."""
     return t[:-3] if t.endswith(".JK") else t
-
-
-def support_resistance(df):
-    support = df['Low'].rolling(20).min().iloc[-1]
-    resistance = df['High'].rolling(20).max().iloc[-1]
-    return support, resistance
-
-
-def trend_strength(df):
-    """UPGRADE: sebelumnya pakai SMA20 vs SMA50 (rata-rata biasa), sekarang
-    EMA20 vs EMA50 (Exponential Moving Average) -- lebih responsif ke
-    perubahan harga terbaru, sesuai indikator 'EMA 20/50' yang diminta."""
-    ema20 = calc_ema(df, 20)
-    ema50 = calc_ema(df, 50)
-    if ema20.iloc[-1] > ema50.iloc[-1]:
-        return "Bullish Strong"
-    elif ema20.iloc[-1] < ema50.iloc[-1]:
-        return "Bearish"
-    else:
-        return "Sideways"
-
-
-def volume_spike(df):
-    return df['Volume'].iloc[-1] > df['Volume'].rolling(10).mean().iloc[-1] * 1.5
-
-
-def breakout_valid(df, resistance):
-    return df['Close'].iloc[-1] > resistance and df['Close'].iloc[-2] < resistance
-
-
-def swing_detector(df):
-    high = df['High'].rolling(10).max().iloc[-10]
-    now = df['Close'].iloc[-1]
-    drop = (high - now) / high * 100
-    return drop > 25, drop
 
 
 def pct_change(df):
@@ -1753,147 +1573,30 @@ def pct_change(df):
     return (now - prev) / prev * 100
 
 
-def pct_change_week(df):
-    """% perubahan harga dari ~5 hari bursa lalu (kira-kira 1 minggu bursa)
-    ke harga penutupan terakhir. Kalau data historinya kurang dari 6 baris
-    (saham baru IPO / data terbatas), pakai baris paling awal yang ada."""
-    if len(df) < 2:
-        return 0.0
-    idx_back = min(5, len(df) - 1)
-    past = df['Close'].iloc[-1 - idx_back]
-    now = df['Close'].iloc[-1]
-    if past == 0:
-        return 0.0
-    return (now - past) / past * 100
-
-
-@st.cache_data(ttl=15 * 60, show_spinner=False)
-def get_quick_quote(ticker_jk):
-    """Ambil harga terakhir + %perubahan harian saja untuk saham DI LUAR
-    watchlist ISSI (non-syariah). SENGAJA tidak menghitung skor/sinyal/
-    status bandar untuk saham ini — sesuai keputusan: sistem tidak
-    menampilkan rekomendasi/analisis untuk saham non-syariah, cuma info
-    harga dasar. Return dict {"price", "change_pct"} atau None kalau
-    ticker tidak valid / data tidak tersedia.
-    (Didefinisikan di sini, SEBELUM titik 'st.stop()' halaman portofolio,
-    supaya tidak NameError saat dipanggil dari render_portfolio_page /
-    add_to_portfolio — script Streamlit berhenti di st.stop() sebelum
-    sempat mengeksekusi definisi fungsi yang ditulis lebih ke bawah.)"""
+@st.cache_data(ttl=900, show_spinner=False)
+def get_quick_quote_cached(ticker_jk):
+    """Harga terakhir + %perubahan untuk 1 saham (ISSI maupun bukan) --
+    dibaca dari tabel `stock_quotes` di Supabase (diisi scan_worker.py
+    tiap ~15 menit untuk SEMUA saham IDX), BUKAN panggil yfinance
+    langsung. Dipakai di 2 tempat: (1) validasi pas "Tambah ke
+    Portofolio" (cek kode sahamnya ada/valid), (2) render_portfolio_page
+    (tampilan harga saham non-ISSI yang sudah dipegang). Return None
+    kalau ticker tidak ditemukan / belum pernah ke-scan."""
     try:
-        df = yf.Ticker(ticker_jk).history(period="10d", interval="1d", auto_adjust=True)
-        if df is None or df.empty or len(df) < 2:
+        res = (
+            supabase_client.table("stock_quotes")
+            .select("price, change_pct")
+            .eq("ticker", ticker_jk)
+            .execute()
+        )
+        if not res.data:
             return None
-        price = float(df['Close'].iloc[-1])
-        change_pct = pct_change(df)
-        return {"price": round(price, 2), "change_pct": round(float(change_pct), 2)}
+        row = res.data[0]
+        if row.get("price") is None:
+            return None
+        return {"price": row["price"], "change_pct": row.get("change_pct")}
     except Exception:
         return None
-
-
-def scoring(df, support, resistance):
-    """Scoring gabungan, total maksimal 100. Sekarang menggabungkan
-    kriteria klasik (support/breakout/volume/trend EMA) DENGAN indikator
-    teknikal tambahan: RSI, MACD, ADX, Bollinger Bands, VWAP, Fibonacci.
-
-    Tiap kriteria kasih poin KALAU kepenuhi. Kalau datanya belum cukup
-    buat 1 indikator tertentu (saham baru listing, histori pendek) atau
-    kriterianya gak kepenuhi, poinnya 0 -- TIDAK dipaksa kasih poin biar
-    skor 'kelihatan bagus'. Bobot per kriteria (total 100):
-      - Harga dekat support        : 10
-      - Breakout valid              : 15
-      - Volume spike                : 10
-      - Trend EMA20>EMA50 (bullish) : 15
-      - RSI momentum bullish        : 10
-      - MACD bullish crossover      : 10
-      - ADX tren kuat + arah naik   : 10
-      - Bollinger Bands posisi      : 10
-      - VWAP (harga > VWAP rolling) : 5
-      - Fibonacci dekat support kuat: 5
-    """
-    score = 0
-    price = df['Close'].iloc[-1]
-
-    # ---- Kriteria klasik ----
-    if price <= support * 1.05:
-        score += 10
-    if breakout_valid(df, resistance):
-        score += 15
-    if volume_spike(df):
-        score += 10
-    if "Bullish" in trend_strength(df):
-        score += 15
-
-    # ---- RSI: momentum bullish sehat (bukan overbought), atau oversold
-    # (potensi rebound, poin lebih kecil karena bukan sinyal sekuat momentum) ----
-    try:
-        rsi_val = calc_rsi(df).iloc[-1]
-        if 50 < rsi_val <= 70:
-            score += 10
-        elif rsi_val < 30:
-            score += 5
-    except Exception:
-        pass
-
-    # ---- MACD: garis MACD di atas garis sinyal DAN histogram positif ----
-    try:
-        macd_line, signal_line, hist = calc_macd(df)
-        if macd_line.iloc[-1] > signal_line.iloc[-1] and hist.iloc[-1] > 0:
-            score += 10
-    except Exception:
-        pass
-
-    # ---- ADX: tren KUAT (>=25) dan arahnya naik (+DI > -DI) ----
-    try:
-        adx_val, plus_di, minus_di = calc_adx(df)
-        if adx_val.iloc[-1] >= 25 and plus_di.iloc[-1] > minus_di.iloc[-1]:
-            score += 10
-    except Exception:
-        pass
-
-    # ---- Bollinger Bands: breakout upper band (momentum kuat) ATAU
-    # baru mantul dari lower band (potensi rebound, poin lebih kecil) ----
-    try:
-        bb_upper, bb_mid, bb_lower = calc_bollinger(df)
-        if price >= bb_upper.iloc[-1]:
-            score += 10
-        elif price <= bb_lower.iloc[-1] * 1.02:
-            score += 5
-    except Exception:
-        pass
-
-    # ---- VWAP rolling: harga di atas VWAP = bias beli lebih dominan ----
-    try:
-        vwap_val = calc_vwap_rolling(df).iloc[-1]
-        if pd.notna(vwap_val) and price > vwap_val:
-            score += 5
-    except Exception:
-        pass
-
-    # ---- Fibonacci: harga lagi persis di level support kuat (0.5/0.618),
-    # toleransi 1.5% dari harga sekarang ----
-    try:
-        fib = calc_fibonacci_levels(df)
-        if fib:
-            for lvl_key in ("0.5", "0.618"):
-                lvl_price = fib[lvl_key]
-                if lvl_price > 0 and abs(price - lvl_price) / price <= 0.015:
-                    score += 5
-                    break
-    except Exception:
-        pass
-
-    return min(score, 100)
-
-
-def signal(score):
-    if score >= 75:
-        return "STRONG BUY 🚀"
-    elif score >= 50:
-        return "BUY"
-    elif score >= 30:
-        return "HOLD"
-    else:
-        return "SELL"
 
 
 def score_badge(score):
@@ -1951,8 +1654,8 @@ def render_html_table(df):
             else:
                 cells += f"<td>{row[col]}</td>"
         # Lencana buat 3 peringkat teratas (tabel sudah terurut dari skor
-        # tertinggi, lihat build_full_scan -> sort_values("score")), biar
-        # user langsung tahu peringkat itu dinilai dari skor scoring().
+        # tertinggi -- data & urutannya datang dari scan_results Supabase),
+        # biar user langsung tahu peringkat itu dinilai dari skor.
         medal = {1: "🥇 ", 2: "🥈 ", 3: "🥉 "}.get(pos, "")
         body_rows.append(f"<tr><td>{medal}{pos}</td>{cells}</tr>")
 
@@ -1975,149 +1678,6 @@ def signal_badge(sig):
     else:
         cls = "badge-sell"
     return f'<span class="badge {cls}">{sig}</span>'
-
-
-def entry_exit(df, support, resistance):
-    return support * 1.02, resistance * 0.98, support * 0.95
-
-
-def bandar_detection(df):
-    vol = df['Volume']
-    close = df['Close']
-    if vol.iloc[-1] > vol.rolling(10).mean().iloc[-1] * 1.5:
-        change = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100
-        if 0 < change < 3:
-            return "🟢 AKUMULASI"
-        if change >= 3:
-            return "🚀 MARKUP"
-        if change < 0:
-            return "🔴 DISTRIBUSI"
-    return "NETRAL"
-
-
-def fake_breakout_detector(df, resistance):
-    return df['Close'].iloc[-2] > resistance and df['Close'].iloc[-1] < resistance
-
-
-# ============================================================
-#  INDIKATOR TEKNIKAL TAMBAHAN — RSI, MACD, EMA, ATR, ADX,
-#  Bollinger Bands, VWAP, Auto-Fibonacci.
-#  Semua dipakai sebagai KOMPONEN SCORING (lihat scoring()), bukan
-#  kolom tabel baru -- tujuannya scoring makin akurat/kuat, sesuai
-#  indikator yang sudah jadi standar di produk sejenis.
-# ============================================================
-def calc_ema(df, span):
-    """Exponential Moving Average -- lebih responsif ke harga terbaru
-    dibanding SMA biasa, karena bobot data baru lebih besar."""
-    return df['Close'].ewm(span=span, adjust=False).mean()
-
-
-def calc_rsi(df, period=14):
-    """RSI (Relative Strength Index) 0-100. Wilder's smoothing (standar
-    baku RSI, bukan simple moving average biasa). >70 = overbought,
-    <30 = oversold. Kalau data belum cukup / avg_loss = 0, netral (50)
-    -- BUKAN dipaksa jadi sinyal kuat."""
-    delta = df['Close'].diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_val = 100 - (100 / (1 + rs))
-    return rsi_val.fillna(50)
-
-
-def calc_macd(df, fast=12, slow=26, signal=9):
-    """MACD standar (EMA12 - EMA26), garis sinyal EMA9 dari MACD line,
-    dan histogram (MACD - sinyal). Return 3 Series: macd_line, signal_line, hist."""
-    ema_fast = df['Close'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['Close'].ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
-
-
-def calc_atr(df, period=14):
-    """Average True Range (Wilder) -- ukuran volatilitas harian, dipakai
-    scoring lain (bukan berdiri sendiri) buat menimbang seberapa 'wajar'
-    breakout/volume spike terjadi relatif ke volatilitas normal saham itu."""
-    high, low, close = df['High'], df['Low'], df['Close']
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-    ).max(axis=1)
-    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-
-
-def calc_adx(df, period=14):
-    """ADX (Average Directional Index) + DI/-DI (Wilder). ADX >= 25 =
-    tren sedang kuat (naik ATAU turun -- makanya WAJIB dicek bareng
-    +DI vs -DI buat tau arahnya). Return (adx, plus_di, minus_di)."""
-    high, low, close = df['High'], df['Low'], df['Close']
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-    ).max(axis=1)
-    atr_val = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * (
-        plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-        / atr_val.replace(0, np.nan)
-    )
-    minus_di = 100 * (
-        minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-        / atr_val.replace(0, np.nan)
-    )
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx_val = dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    return adx_val.fillna(0), plus_di.fillna(0), minus_di.fillna(0)
-
-
-def calc_bollinger(df, period=20, num_std=2):
-    """Bollinger Bands standar: SMA20 di tengah, ±2 standar deviasi.
-    Return (upper, mid, lower)."""
-    mid = df['Close'].rolling(period).mean()
-    std = df['Close'].rolling(period).std()
-    upper = mid + num_std * std
-    lower = mid - num_std * std
-    return upper, mid, lower
-
-
-def calc_vwap_rolling(df, period=20):
-    """PENDEKATAN, bukan VWAP intraday asli -- VWAP asli reset tiap hari
-    dari data per-menit yang TIDAK tersedia dari yfinance interval
-    harian (sama seperti keterbatasan yang dibahas soal BSJP). Ini
-    'VWAP rolling N hari' dari data harian: total(harga tipikal x volume)
-    / total(volume) selama N hari terakhir -- dipakai sebagai proxy level
-    harga rata-rata tertimbang volume, bukan VWAP harian yang presisi."""
-    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-    pv = typical_price * df['Volume']
-    return pv.rolling(period).sum() / df['Volume'].rolling(period).sum()
-
-
-def calc_fibonacci_levels(df, lookback=60):
-    """Level Fibonacci retracement otomatis dari swing high & swing low
-    N hari terakhir. Return dict {level: harga}, atau {} kalau data
-    kurang / swing high=low (gak ada range buat dihitung)."""
-    window = df.tail(lookback)
-    swing_high = window['High'].max()
-    swing_low = window['Low'].min()
-    diff = swing_high - swing_low
-    if diff <= 0:
-        return {}
-    return {
-        "0.0": swing_high,
-        "0.236": swing_high - 0.236 * diff,
-        "0.382": swing_high - 0.382 * diff,
-        "0.5": swing_high - 0.5 * diff,
-        "0.618": swing_high - 0.618 * diff,
-        "0.786": swing_high - 0.786 * diff,
-        "1.0": swing_low,
-    }
 
 
 # ============================================================
@@ -2147,44 +1707,55 @@ def last_trading_date():
 
 
 @st.cache_data(ttl=20 * 3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_broker_summary(symbol, date_str):
     """Ambil ringkasan broker (kode broker, sisi beli/jual, lot, value,
     avg price, tipe investor) untuk 1 saham pada 1 tanggal tertentu.
     date_str format: YYYY-MM-DD. Return (DataFrame, error_message).
-    DataFrame kosong + error_message terisi kalau gagal.
+
+    SUMBER: tabel `broker_summary` di Supabase, diisi 1x/hari oleh
+    scan_worker.py (bukan panggil GOAPI langsung dari sini lagi) --
+    jadi API key GOAPI juga sudah tidak perlu ada di app/Secrets sama
+    sekali, cukup di GitHub Actions Secrets. Kalau tanggal yang diminta
+    belum pernah di-scan (mis. tanggal jauh di masa lalu, sebelum
+    sistem ini berjalan), akan kosong dengan pesan yang menjelaskan itu.
     """
-    clean_symbol = symbol[:-3] if symbol.endswith(".JK") else symbol
-    if not GOAPI_API_KEY or GOAPI_API_KEY == "ISI_API_KEY_GOAPI_LO":
-        return pd.DataFrame(), "GOAPI_API_KEY belum diisi di Secrets."
     try:
-        resp = requests.get(
-            GOAPI_BROKER_ENDPOINT_TEMPLATE.format(symbol=clean_symbol),
-            params={"date": date_str},
-            headers={"X-API-KEY": GOAPI_API_KEY},
-            timeout=10,
+        res = (
+            supabase_client.table("broker_summary")
+            .select("data, error_message")
+            .eq("ticker", symbol)
+            .eq("date", date_str)
+            .execute()
         )
-        resp.raise_for_status()
-        payload = resp.json()
-        rows = payload.get("data", payload) if isinstance(payload, dict) else payload
-        if not rows:
+        if not res.data:
+            return pd.DataFrame(), (
+                "Belum ada data broker tersimpan untuk tanggal ini "
+                "(kemungkinan sebelum sistem pusat mulai scan, atau "
+                "bukan hari bursa)."
+            )
+        row = res.data[0]
+        if row.get("error_message"):
+            return pd.DataFrame(), row["error_message"]
+        records = row.get("data") or []
+        if not records:
             return pd.DataFrame(), None
-        records = []
-        for r in rows:
-            broker = r.get("broker", {}) or {}
-            records.append({
-                "broker_code": broker.get("code", r.get("code", "-")),
-                "broker_name": broker.get("name", "-"),
-                "side": (r.get("side") or "-").upper(),
-                "lot": r.get("lot", 0),
-                "value": r.get("value", 0),
-                "avg": r.get("avg", 0),
-                "investor": r.get("investor", "-"),
-            })
         return pd.DataFrame(records), None
-    except requests.exceptions.HTTPError as e:
-        return pd.DataFrame(), f"GOAPI error: {e}"
     except Exception as e:
-        return pd.DataFrame(), f"Gagal ambil data broker: {e}"
+        return pd.DataFrame(), f"Gagal ambil data broker dari Supabase: {e}"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _broker_data_available():
+    """Cek apakah tabel `broker_summary` di Supabase sudah pernah diisi
+    scan_worker.py (artinya GOAPI_API_KEY sudah dikonfigurasi di GitHub
+    Actions Secrets & job harian sudah pernah jalan sukses). Dipakai
+    buat gate 'locked / segera hadir' di panel Broker Summary."""
+    try:
+        res = supabase_client.table("broker_summary").select("ticker").limit(1).execute()
+        return bool(res.data)
+    except Exception:
+        return False
 
 
 def broker_category_class(investor_value):
@@ -2259,7 +1830,8 @@ def resample_price_history(hist, freq):
 
 def _render_broker_summary_panel():
     """Isi panel Broker Summary yang fungsional (dipanggil hanya kalau
-    GOAPI_API_KEY sudah dikonfigurasi — lihat gate 'locked' di panel UI)."""
+    ada data broker tersimpan di Supabase -- lihat gate 'locked' di
+    panel UI, _broker_data_available())."""
     default_date = last_trading_date()
     bcol1, bcol2, bcol3 = st.columns([2, 1, 1])
     with bcol1:
@@ -2309,11 +1881,13 @@ def _render_broker_summary_panel():
         st.error("Data broker sedang tidak bisa diambil, coba lagi sebentar lagi.")
         if status == "owner":
             st.caption(
-                f"[Owner] Detail error: {broker_err} — cek: (1) GOAPI_API_KEY "
-                "sudah diisi di Secrets, (2) endpoint/header di "
-                "fetch_broker_summary() sudah cocok dengan dokumentasi resmi "
-                "di dashboard GOAPI kamu (goapi.io/docs), (3) kuota API "
-                "gratis belum habis."
+                f"[Owner] Detail error: {broker_err} — cek di sisi "
+                "scan_worker.py (GitHub Actions), BUKAN di Streamlit "
+                "Secrets: (1) GOAPI_API_KEY sudah diisi di GitHub Actions "
+                "Secrets, (2) endpoint/header di fetch_broker_summary() "
+                "(scan_engine.py) sudah cocok dokumentasi resmi GOAPI "
+                "(goapi.io/docs), (3) kuota API belum habis, (4) workflow "
+                "GitHub Actions jalan tanpa error (cek tab Actions di repo)."
             )
     elif df_broker.empty:
         st.info(
@@ -2377,50 +1951,6 @@ def send_telegram(msg):
     except Exception:
         return False
 
-
-
-# CATATAN: build_full_scan() di bawah ini SUDAH TIDAK DIPANGGIL di mana
-# pun lagi. App sekarang TIDAK PERNAH scan sendiri -- selalu baca hasil
-# scan terpusat dari Supabase (lihat _load_central_scan / ensure_scanned
-# di atas). Fungsi ini dibiarkan ada (bukan dihapus) sebagai referensi
-# logika scan, kalau-kalau suatu saat dibutuhkan lagi.
-def build_full_scan():
-    """Jalan sekali, hitung semua metrik untuk semua saham. Disimpan di
-    session_state supaya tiap action button bisa slice/filter tanpa
-    download ulang."""
-    results = []
-    all_data = get_all_data(tuple(ISSI_STOCKS))
-    for stock, df in all_data.items():
-        try:
-            support, resistance = support_resistance(df)
-            score = scoring(df, support, resistance)
-            sig = signal(score)
-            trend = trend_strength(df)
-            swing, drop = swing_detector(df)
-            entry, tp, sl = entry_exit(df, support, resistance)
-            bandar = bandar_detection(df)
-            fake_break = fake_breakout_detector(df, resistance)
-            change_pct = pct_change(df)
-            week_change_pct = pct_change_week(df)
-            results.append({
-                "stock": stock,
-                "price": round(float(df['Close'].iloc[-1]), 2),
-                "change_pct": round(float(change_pct), 2),
-                "week_change_pct": round(float(week_change_pct), 2),
-                "score": score,
-                "signal": sig,
-                "trend": trend,
-                "entry": round(float(entry), 2),
-                "tp": round(float(tp), 2),
-                "sl": round(float(sl), 2),
-                "swing": swing,
-                "drop": round(float(drop), 2),
-                "bandar": bandar,
-                "fake_breakout": fake_break,
-            })
-        except Exception:
-            continue
-    return pd.DataFrame(results).sort_values(by="score", ascending=False).reset_index(drop=True)
 
 
 # ============================================================
@@ -2597,7 +2127,7 @@ def render_portfolio_page(user_db, identifier, display_name):
                 bandar_txt = "–"
                 row_cls = ""
         else:
-            quote = get_quick_quote(ticker_jk)
+            quote = get_quick_quote_cached(ticker_jk)
             row_cls = "portfolio-row-nonsyariah"
             if quote:
                 price = f"{quote['price']:,.0f}"
@@ -2761,125 +2291,136 @@ if st.session_state.get("show_customer_panel"):
 # ============================================================
 #  HALAMAN DETAIL SAHAM — muncul saat nama saham diklik di tabel
 # ============================================================
-# WADAH DATA PROVIDER: dua fungsi _fetch_..._goapi() di bawah ini
-# sengaja dikosongkan (placeholder). Begitu kamu langganan GOAPI:
-#   1. GOAPI_API_KEY di Secrets sudah kepakai (sama dengan Broker Summary)
-#   2. Isi logic fetch di _fetch_history_goapi() / _fetch_fundamentals_goapi(),
-#      sesuaikan path-nya dengan GOAPI_HISTORY_ENDPOINT_TEMPLATE /
-#      GOAPI_FUNDAMENTAL_ENDPOINT_TEMPLATE di bagian CONFIG (cek dokumentasi
-#      GOAPI dulu, path di sana baru perkiraan)
-# Selama itu belum diisi, semua otomatis fallback ke yfinance, dan field
-# yang tidak tersedia ditulis "Data tidak tersedia" (bukan error/crash).
-
-def _fetch_history_goapi(ticker_jk, period_label):
-    """PLACEHOLDER — belum diimplementasikan. Isi nanti kalau sudah
-    langganan GOAPI (pakai GOAPI_HISTORY_ENDPOINT_TEMPLATE). period_label
-    adalah salah satu key di PERIOD_OPTIONS (mis. "1 Tahun", "5 Tahun",
-    "Sejak IPO (Max)") — dipakai untuk menentukan rentang tanggal & interval
-    saat memanggil endpoint GOAPI. Harus return DataFrame dengan kolom:
-    Date, Open, High, Low, Close, Volume."""
-    raise NotImplementedError("Fetch histori GOAPI belum diimplementasikan")
-
-
-def _fetch_fundamentals_goapi(ticker_jk):
-    """PLACEHOLDER — belum diimplementasikan. Isi nanti kalau sudah
-    langganan GOAPI (pakai GOAPI_FUNDAMENTAL_ENDPOINT_TEMPLATE). Harus
-    return dict dengan key: nama, sektor, industri, market_cap, per, eps,
-    mata_uang."""
-    raise NotImplementedError("Fetch fundamental GOAPI belum diimplementasikan")
-
-
-_goapi_configured_for_detail = bool(GOAPI_API_KEY) and GOAPI_API_KEY != "ISI_API_KEY_GOAPI_LO"
+# ============================================================
+#  HALAMAN DETAIL SAHAM — muncul saat nama saham diklik di tabel
+# ============================================================
+# SEMUA data di halaman ini (histori harga, fundamental) sekarang
+# dibaca dari Supabase (diisi 1x/hari untuk histori panjang & sekali/
+# 15 menit untuk intraday oleh scan_worker.py) -- app TIDAK PERNAH lagi
+# manggil yfinance langsung dari sini. Ini yang nutup akar masalah
+# segmentation fault: dulu tiap user buka halaman detail saham, app
+# manggil yfinance (curl_cffi) sendiri-sendiri secara bersamaan.
 
 # Pilihan rentang waktu grafik histori harga. "days" dipakai untuk hitung
-# tanggal mulai (None = sejak IPO/data paling awal yang ada, "ytd" = sejak
-# 1 Januari tahun berjalan). "interval" disesuaikan supaya jumlah titik
-# data tetap wajar (intraday untuk rentang pendek, mingguan/bulanan untuk
-# rentang yang sangat panjang).
+# rentang tanggal yang di-slice dari data harian terpusat ("ytd" = sejak
+# 1 Januari tahun berjalan, None = semua data sejak IPO yang ada).
+# "resample" ("W"/"ME") dipakai untuk rentang panjang biar jumlah titik
+# tetap wajar. "1 Hari"/"1 Minggu" sumbernya beda -- dari stock_intraday
+# (candle 5 menit), bukan slice dari data harian.
 PERIOD_OPTIONS = {
-    "1 Hari": {"days": 1, "interval": "5m"},
-    "1 Minggu": {"days": 7, "interval": "30m"},
-    "1 Bulan": {"days": 30, "interval": "1d"},
-    "Tahun Ini (YTD)": {"days": "ytd", "interval": "1d"},
-    "1 Tahun": {"days": 365, "interval": "1d"},
-    "3 Tahun": {"days": 365 * 3, "interval": "1wk"},
-    "5 Tahun": {"days": 365 * 5, "interval": "1wk"},
-    "Sejak IPO (Max)": {"days": None, "interval": "1mo"},
+    "1 Hari": {"days": 1, "source": "intraday"},
+    "1 Minggu": {"days": 7, "source": "intraday", "resample": "30min"},
+    "1 Bulan": {"days": 30, "source": "daily"},
+    "Tahun Ini (YTD)": {"days": "ytd", "source": "daily"},
+    "1 Tahun": {"days": 365, "source": "daily"},
+    "3 Tahun": {"days": 365 * 3, "source": "daily", "resample": "W"},
+    "5 Tahun": {"days": 365 * 5, "source": "daily", "resample": "W"},
+    "Sejak IPO (Max)": {"days": None, "source": "daily", "resample": "ME"},
 }
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def get_stock_history(ticker_jk, period_label):
-    """Histori harga untuk 1 saham sesuai rentang waktu yang dipilih user
-    (lihat PERIOD_OPTIONS). Prioritas GOAPI kalau sudah dikonfigurasi,
-    fallback ke yfinance."""
-    cfg = PERIOD_OPTIONS.get(period_label, PERIOD_OPTIONS["1 Tahun"])
-    interval = cfg["interval"]
-    days = cfg["days"]
-
-    if _goapi_configured_for_detail:
-        try:
-            df_api = _fetch_history_goapi(ticker_jk, period_label)
-            if df_api is not None and not df_api.empty:
-                return df_api
-        except NotImplementedError:
-            pass
-        except Exception:
-            pass
-
+def _load_daily_history_df(ticker_jk):
+    """Baca histori harian (panjang, dari IPO) dari Supabase, cache 15
+    menit dibagi semua user. Return DataFrame(Date, Open, High, Low,
+    Close, Volume) urut TERLAMA -> TERBARU, atau None kalau belum ada."""
     try:
-        ticker_obj = yf.Ticker(ticker_jk)
-        if days is None:
-            # "Sejak IPO" — ambil data paling panjang yang tersedia di yfinance
-            df = ticker_obj.history(period="max", interval=interval, auto_adjust=True)
-        elif days == "ytd":
-            start = datetime(datetime.now().year, 1, 1)
-            df = ticker_obj.history(start=start, interval=interval, auto_adjust=True)
-        else:
-            start = datetime.now() - timedelta(days=days)
-            df = ticker_obj.history(start=start, interval=interval, auto_adjust=True)
-        if df is None or df.empty:
+        res = supabase_client.table("stock_history").select("data").eq("ticker", ticker_jk).execute()
+        if not res.data or not res.data[0].get("data"):
             return None
-        df = df.reset_index()
-        # Data intraday (interval < 1d) index-nya bernama "Datetime", bukan
-        # "Date" — samakan namanya biar kode chart di bawah tidak perlu tahu
-        # bedanya.
-        if "Datetime" in df.columns:
-            df = df.rename(columns={"Datetime": "Date"})
-        return df
+        df = pd.DataFrame(res.data[0]["data"])
+        df = df.rename(columns={"date": "Date", "open": "Open", "high": "High",
+                                 "low": "Low", "close": "Close", "volume": "Volume"})
+        df["Date"] = pd.to_datetime(df["Date"])
+        return df.sort_values("Date").reset_index(drop=True)
     except Exception:
         return None
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_intraday_history_df(ticker_jk):
+    """Baca histori intraday (candle 5 menit, ~5 hari terakhir) dari
+    Supabase, cache 15 menit dibagi semua user."""
+    try:
+        res = supabase_client.table("stock_intraday").select("data").eq("ticker", ticker_jk).execute()
+        if not res.data or not res.data[0].get("data"):
+            return None
+        df = pd.DataFrame(res.data[0]["data"])
+        df = df.rename(columns={"date": "Date", "open": "Open", "high": "High",
+                                 "low": "Low", "close": "Close", "volume": "Volume"})
+        df["Date"] = pd.to_datetime(df["Date"])
+        return df.sort_values("Date").reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def _resample_ohlcv(df, freq):
+    """Resample DataFrame OHLCV (kolom Date/Open/High/Low/Close/Volume)
+    ke frekuensi lain (mis. '30min', 'W', 'ME') dengan agregasi yang
+    benar per kolom (bukan cuma ambil Close)."""
+    d = df.set_index("Date").sort_index()
+    agg = d.resample(freq).agg({
+        "Open": "first", "High": "max", "Low": "min",
+        "Close": "last", "Volume": "sum",
+    }).dropna(subset=["Close"])
+    return agg.reset_index()
+
+
+def get_stock_history(ticker_jk, period_label):
+    """Histori harga untuk 1 saham sesuai rentang waktu yang dipilih
+    user (lihat PERIOD_OPTIONS) -- semua di-derive dari data terpusat
+    Supabase (stock_history / stock_intraday), tanpa panggilan live
+    apapun ke yfinance."""
+    cfg = PERIOD_OPTIONS.get(period_label, PERIOD_OPTIONS["1 Tahun"])
+    days = cfg["days"]
+
+    if cfg["source"] == "intraday":
+        df = _load_intraday_history_df(ticker_jk)
+        if df is None or df.empty:
+            return None
+        if period_label == "1 Hari":
+            last_day = df["Date"].dt.date.max()
+            df = df[df["Date"].dt.date == last_day].reset_index(drop=True)
+        resample_freq = cfg.get("resample")
+        if resample_freq:
+            df = _resample_ohlcv(df, resample_freq)
+        return df if not df.empty else None
+
+    df = _load_daily_history_df(ticker_jk)
+    if df is None or df.empty:
+        return None
+
+    if days == "ytd":
+        start = datetime(datetime.now().year, 1, 1)
+        df = df[df["Date"] >= start]
+    elif days is not None:
+        start = datetime.now() - timedelta(days=days)
+        df = df[df["Date"] >= start]
+    # days is None ("Sejak IPO") -> pakai semua data, tidak difilter
+
+    resample_freq = cfg.get("resample")
+    if resample_freq:
+        df = _resample_ohlcv(df, resample_freq)
+
+    df = df.reset_index(drop=True)
+    return df if not df.empty else None
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_stock_fundamentals(ticker_jk):
-    """Info fundamental dasar 1 saham. Prioritas GOAPI kalau sudah
-    dikonfigurasi, fallback ke yfinance .info (untuk saham IDX sering
-    tidak lengkap — field kosong ditandai None, ditampilkan sebagai
-    'Data tidak tersedia' di halaman detail)."""
+    """Info fundamental dasar 1 saham, dibaca dari Supabase (diisi 1x/
+    hari oleh scan_worker.py). Field kosong ditandai None -> ditampilkan
+    'Data tidak tersedia' di halaman detail."""
     fields = {
         "nama": None, "sektor": None, "industri": None,
         "market_cap": None, "per": None, "eps": None, "mata_uang": None,
     }
-    if _goapi_configured_for_detail:
-        try:
-            data = _fetch_fundamentals_goapi(ticker_jk)
-            if data:
-                fields.update(data)
-                return fields
-        except NotImplementedError:
-            pass
-        except Exception:
-            pass
     try:
-        info = yf.Ticker(ticker_jk).info or {}
-        fields["nama"] = info.get("longName") or info.get("shortName")
-        fields["sektor"] = info.get("sector")
-        fields["industri"] = info.get("industry")
-        fields["market_cap"] = info.get("marketCap")
-        fields["per"] = info.get("trailingPE")
-        fields["eps"] = info.get("trailingEps")
-        fields["mata_uang"] = info.get("currency")
+        res = supabase_client.table("stock_fundamentals").select("*").eq("ticker", ticker_jk).execute()
+        if res.data:
+            row = res.data[0]
+            for key in fields:
+                fields[key] = row.get(key)
     except Exception:
         pass
     return fields
@@ -3064,11 +2605,11 @@ def render_stock_detail_page(ticker_raw):
             df_daily = df_daily.sort_values("Date", ascending=False).reset_index(drop=True)
 
             # Broker Top 5 Net Buy/Sell CUMA untuk 3 hari bursa TERAKHIR
-            # (kesepakatan hemat kuota API — lihat catatan di
-            # get_top5_broker_net: 1 tanggal = 1 panggilan API, di-cache
-            # 20 jam & dibagi ke SEMUA user, bukan per-user).
+            # (dan cuma tersedia kalau scan_worker.py sudah pernah nyimpen
+            # broker_summary buat tanggal itu -- datanya dari Supabase,
+            # bukan panggilan API live dari app).
             broker_col_html = {}
-            if _goapi_configured_for_detail:
+            if _broker_data_available():
                 for i in range(min(3, len(df_daily))):
                     d = df_daily.iloc[i]["Date"]
                     date_str = d.strftime("%Y-%m-%d")
@@ -3103,7 +2644,7 @@ def render_stock_detail_page(ticker_raw):
                 )
             broker_note = (
                 "Top 5 broker (3 hari bursa terakhir saja)"
-                if _goapi_configured_for_detail
+                if _broker_data_available()
                 else "Data top 5 broker belum tersedia untuk saham ini"
             )
             st.markdown(
@@ -3155,7 +2696,7 @@ def render_stock_detail_page(ticker_raw):
                   </table>
                 </div>
                 <div style="margin-top:6px; color:#9ca3af; font-size:12px;">
-                    Kolom broker cuma tersedia di tampilan Harian (hemat kuota API).
+                    Kolom broker cuma tersedia di tampilan Harian (data broker per hari bursa, bukan mingguan/bulanan).
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -3174,11 +2715,11 @@ def render_stock_detail_page(ticker_raw):
     fcols2[1].metric("EPS", _fmt_metric(fundamentals["eps"], decimals=2))
     fcols2[2].metric("Mata Uang", fundamentals["mata_uang"] or "Data tidak tersedia")
 
-    if not _goapi_configured_for_detail:
+    if not fundamentals.get("sektor") and not fundamentals.get("per"):
         st.caption(
-            "📡 Sebagian data fundamental saham ini mungkin belum lengkap. "
-            "Data akan otomatis lebih lengkap begitu sumber data premium "
-            "diaktifkan."
+            "📡 Data fundamental saham ini belum tersedia (kemungkinan "
+            "belum sempat ter-scan oleh sistem pusat, atau Yahoo Finance "
+            "memang tidak punya data lengkap untuk saham ini)."
         )
 
     # ---- Ringkasan sinyal dari hasil scan terakhir ----
@@ -3210,13 +2751,13 @@ def render_stock_detail_page(ticker_raw):
 
     if not news_items_raw:
         st.info(
-            "Belum ada berita terbaru untuk saham ini, atau Google News "
-            "sedang tidak bisa diakses."
+            "Belum ada berita terbaru untuk saham ini (data berita "
+            "diperbarui 1x/hari oleh sistem pusat)."
         )
     else:
         for article in news_items_raw:
-            combined_text = f"{article['title']} {article['description']}"
-            sentiment, emoji = analyze_sentiment(combined_text)
+            sentiment = article.get("sentiment", "NETRAL")
+            emoji = article.get("sentiment_emoji", "⚪")
             with st.container(border=True):
                 st.markdown(f"**{article['title']}**")
                 cols = st.columns([1, 2])
@@ -3604,7 +3145,7 @@ else:
     elif _panel == "broker":
         st.subheader("🏦 Broker Summary (Data EOD)")
 
-        _goapi_configured = bool(GOAPI_API_KEY) and GOAPI_API_KEY != "ISI_API_KEY_GOAPI_LO"
+        _goapi_configured = _broker_data_available()
 
         if not _goapi_configured:
             # ---- LOCKED / COMING SOON ----

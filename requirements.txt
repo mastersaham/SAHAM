@@ -25,12 +25,15 @@
 # jalan) -- supaya tiap reboot/wake-up dapat environment yang
 # 100% IDENTIK, bukan tebak-tebakan versi baru tiap hari.
 #
-# CATATAN: kalau setelah pakai file ini crash MASIH terjadi,
-# artinya kombinasi versi ini sendiri yang bermasalah (bukan
-# soal "versi baru tiba-tiba muncul") -- lihat catatan SAFE_MODE
-# di ai_idx_trading_terminal.py untuk uji coba lanjutan (menonaktifkan
-# EncryptedCookieManager sementara, karena itu satu-satunya kode
-# native/crypto yang jalan di SETIAP render halaman).
+# CATATAN: kalau setelah pakai file ini crash MASIH terjadi, artinya
+# kombinasi versi ini sendiri yang bermasalah (bukan soal "versi baru
+# tiba-tiba muncul"). Root cause utama crash sudah ditangani terpisah:
+# semua panggilan yfinance/curl_cffi per-user langsung dari app sudah
+# dipindah ke scan_worker.py (jalan di GitHub Actions, bukan di proses
+# Streamlit Cloud yang sama dipakai banyak user) -- lihat scan_engine.py
+# dan scan_worker.py. Kalau masih crash setelah itu, EncryptedCookieManager
+# (satu-satunya kode native/crypto yang jalan di SETIAP render halaman)
+# adalah kandidat berikutnya untuk diselidiki.
 # ============================================================
 
 streamlit==1.59.1
