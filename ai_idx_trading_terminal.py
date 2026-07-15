@@ -709,26 +709,27 @@ st.markdown("""
         margin-right: 6px;
     }
     /* ---------------------------------------------------------
-       HEADER BARU — sticky, 2 baris: notif+profil, lalu 1 baris
-       kotak ikon kecil (home, portofolio, 4 kategori). Latar gelap
-       netral supaya tombol oranye di dalamnya kontras jelas.
+       HEADER BARU — sticky, 2 baris kuning/oranye gradient, senada
+       sama gaya bar "Komunitas" di bawah. Baris 1: nama app + ikon
+       portofolio + notif + avatar bulat (inisial). Baris 2: nav
+       (home = ikon, 4 kategori = teks label, tanpa ikon).
     --------------------------------------------------------- */
     .st-key-header_status_bar {
         position: sticky;
         top: 0;
         z-index: 999;
-        background: #0f1020;
-        backdrop-filter: blur(6px);
-        padding: 8px 8px 10px 8px;
-        margin: -10px -4px 10px -4px;
-        border-bottom: 1px solid rgba(255,170,60,0.22);
+        background: linear-gradient(135deg, #ffc25c, #ff8a1f);
+        padding: 10px 12px 8px 12px;
+        margin: -10px -4px 0 -4px;
+        box-shadow: 0 6px 18px -12px rgba(0,0,0,0.55);
     }
     /* PERBAIKAN: Streamlit otomatis nge-stack st.columns jadi vertikal
        di layar sempit (<640px). Header ini isinya ikon/tombol pendek
        yang muat sejajar, jadi kita paksa tetap 1 baris horizontal. */
     .st-key-header_status_bar div[data-testid="stHorizontalBlock"] {
         flex-direction: row !important;
-        flex-wrap: wrap !important;   /* jaring pengaman: kalau kepepet, turun baris -- bukan scroll ke samping */
+        flex-wrap: nowrap !important;
+        align-items: center !important;
         gap: 6px !important;
     }
     /* PERBAIKAN: sebelumnya CSS ini nargetin [data-testid="column"],
@@ -740,37 +741,70 @@ st.markdown("""
     .st-key-header_status_bar div[data-testid="stColumn"] {
         min-width: 0 !important;
     }
-    .st-key-header_status_bar div.stButton > button,
-    .st-key-header_status_bar div[data-testid="stPopover"] button {
-        padding: 0.4em 0.5em !important;
-        font-size: 12.5px !important;
-        min-width: 0 !important;
+    /* nama aplikasi "Saham Syariah" -- ambil sisa ruang kolom pertama,
+       teks gelap biar kontras di atas latar oranye */
+    .app_brand_name {
+        font-weight: 800;
+        font-size: 16.5px;
+        color: #1a0f00;
+        line-height: 38px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
-    /* kotak ikon (home/portofolio/kategori): font emoji lebih besar,
-       padding lebih rapat -- ini yang bikin bentuknya kotak kecil */
-    .st-key-nav_icon_row div.stButton > button,
-    .st-key-nav_icon_row div[data-testid="stPopover"] button {
-        padding: 0.45em 0 !important;
-        font-size: 17px !important;
-    }
-    /* baris ikon: kotak-kotak kecil, bukan pil panjang. 2 ikon pertama
-       (home/portofolio) netral outline oranye, 4 sisanya (kategori)
-       solid oranye -- dibedakan lewat posisi kolom, bukan class terpisah,
-       supaya semuanya tetap 1 baris yang sama. */
-    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:nth-child(-n+2) div.stButton > button {
-        background: rgba(255,255,255,0.06) !important;
-        color: #ffb35a !important;
-        box-shadow: none !important;
-        border: 1px solid rgba(255,179,90,0.28) !important;
-        border-radius: 12px !important;
-    }
-    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:nth-child(n+3) div[data-testid="stPopover"] button {
-        background: linear-gradient(135deg, #ffc25c, #ff8a1f) !important;
-        color: #1a0f00 !important;
-        font-weight: 700 !important;
-        border-radius: 12px !important;
+    /* tombol ikon polos (portofolio, notif) di baris 1 -- transparan,
+       cuma ikon gelap, tanpa kotak/border supaya ringkas */
+    .st-key-header_status_bar div.stButton > button {
+        background: transparent !important;
         border: none !important;
         box-shadow: none !important;
+        color: #1a0f00 !important;
+        font-size: 18px !important;
+        padding: 0.3em !important;
+        min-width: 0 !important;
+    }
+    /* avatar bulat (trigger popover profil) berisi inisial nama */
+    .st-key-profile_avatar_wrap div[data-testid="stPopover"] button {
+        background: #1a0f00 !important;
+        color: #ffb35a !important;
+        font-weight: 800 !important;
+        font-size: 13px !important;
+        border-radius: 50% !important;
+        width: 38px !important;
+        height: 38px !important;
+        min-width: 38px !important;
+        padding: 0 !important;
+        border: 2px solid rgba(255,255,255,0.55) !important;
+        box-shadow: none !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-left: auto !important;
+    }
+    /* baris 2: nav -- home tetap ikon, 4 kategori jadi teks label,
+       semua di atas strip oranye yang menyambung dari baris 1 */
+    .st-key-nav_icon_row {
+        background: linear-gradient(135deg, #ffb84d, #ff7e1f);
+        padding: 6px 10px 10px 10px;
+        margin: 0 -4px 10px -4px;
+        border-top: 1px solid rgba(0,0,0,0.08);
+    }
+    .st-key-nav_icon_row div.stButton > button,
+    .st-key-nav_icon_row div[data-testid="stPopover"] button {
+        background: rgba(26,15,0,0.10) !important;
+        color: #1a0f00 !important;
+        font-weight: 700 !important;
+        font-size: 12px !important;
+        border-radius: 10px !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0.5em 0.2em !important;
+        min-width: 0 !important;
+    }
+    /* kolom pertama (Home) -- cuma ikon, sedikit ditonjolkan */
+    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
+        font-size: 18px !important;
+        background: rgba(26,15,0,0.16) !important;
     }
     /* isi popover kategori (sub-menu): tombol biasa, full width, rapi */
     div[data-testid="stPopoverBody"] div.stButton > button {
@@ -1503,26 +1537,40 @@ NAV_CATEGORIES = [
     ]),
 ]
 
-with st.container(key="header_status_bar"):
-    # ---- baris 1: notif + profil ----
-    if status in ("owner", "active") and supabase_client:
-        col_notif, col_status = st.columns([0.7, 3.3])
-    else:
-        col_notif = None
-        col_status = st.columns([4])[0]
+is_subscriber = status in ("owner", "active")
 
-    # ---- Nama profil = trigger dropdown (popover) berisi Privasi Akun
-    # & Logout, biar gak makan tempat sebagai tombol terpisah-pisah di
-    # header. Label tombolnya sendiri sudah nunjukkin status + nama.
-    # Badge centang biru (gaya "verified" media sosial) ditaruh di KANAN
-    # nama, buat owner & pelanggan aktif -- mahkota (owner) tetap di kiri. ----
-    _verified_badge = ":blue[✔️]"
-    if status == "owner":
-        _profile_label = f"👑 {display_name} {_verified_badge}"
-    elif status == "active":
-        _profile_label = f"{display_name} {_verified_badge}"
-    else:
-        _profile_label = f"❌ {display_name}"
+def _get_initials(name):
+    """Ambil 1-2 huruf inisial dari nama buat avatar bulat."""
+    if not name:
+        return "?"
+    parts = [p for p in str(name).strip().split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+with st.container(key="header_status_bar"):
+    # ---- baris 1: nama app (sisa ruang) + portofolio + notif + avatar ----
+    col_brand, col_portfolio, col_notif, col_avatar = st.columns([3.4, 0.55, 0.55, 0.7])
+
+    with col_brand:
+        st.markdown('<div class="app_brand_name">💹 Saham Syariah</div>', unsafe_allow_html=True)
+
+    with col_portfolio:
+        if is_subscriber:
+            if st.button("💼", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
+                st.session_state["show_portfolio"] = True
+                st.rerun()
+
+    with col_notif:
+        if is_subscriber and supabase_client:
+            render_notification_bell(supabase_client, user_id=identifier)
+
+    # ---- Avatar bulat (inisial nama) = trigger dropdown (popover) berisi
+    # status langganan, Privasi Akun & Logout. Status (owner/aktif/belum)
+    # sekarang cuma muncul DI DALAM popover, bukan di avatar-nya sendiri. ----
+    _initials = _get_initials(display_name)
 
     # PERBAIKAN: st.popover bawaan Streamlit TIDAK otomatis nutup diri
     # sendiri kalau tombol DI DALAMNYA diklik lalu trigger st.rerun() --
@@ -1535,90 +1583,81 @@ with st.container(key="header_status_bar"):
         st.session_state["profile_popover_seed"] = 0
     _popover_key = f"profile_popover_{st.session_state['profile_popover_seed']}"
 
-    with col_status:
-        with st.popover(_profile_label, use_container_width=True, key=_popover_key):
-            if status == "owner":
-                st.success("👑 Owner access granted")
+    with col_avatar:
+        with st.container(key="profile_avatar_wrap"):
+            with st.popover(_initials, use_container_width=True, key=_popover_key):
+                st.markdown(f"**{display_name}**")
+                if status == "owner":
+                    st.success("👑 Owner access granted")
+                    st.divider()
+                    if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
+                        st.session_state["show_customer_panel"] = True
+                        st.session_state["profile_popover_seed"] += 1
+                        st.rerun()
+                elif status == "active":
+                    st.success("✅ Subscription aktif")
+                    _sub_info = get_subscription_info(identifier, user_db)
+                    if _sub_info and _sub_info.get("subscribed_at") and _sub_info.get("expires_at"):
+                        try:
+                            _mulai_dt = datetime.fromisoformat(_sub_info["subscribed_at"])
+                            _akhir_dt = datetime.fromisoformat(_sub_info["expires_at"])
+                            _plan_label = PLAN_LABELS.get(_sub_info["plan"], _sub_info["plan"] or "-")
+                            st.caption(
+                                f"Paket **{_plan_label}**  \n"
+                                f"Mulai: {format_tanggal_id(_mulai_dt)}  \n"
+                                f"Berakhir: {format_tanggal_id(_akhir_dt)} "
+                                f"(sisa {_sub_info['days_left']} hari)"
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                else:
+                    st.warning("❌ Belum berlangganan")
                 st.divider()
-                if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
-                    st.session_state["show_customer_panel"] = True
+                if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
+                    st.session_state.active_panel = "privacy"
                     st.session_state["profile_popover_seed"] += 1
                     st.rerun()
-            elif status == "active":
-                st.success("✅ Subscription aktif")
-                _sub_info = get_subscription_info(identifier, user_db)
-                if _sub_info and _sub_info.get("subscribed_at") and _sub_info.get("expires_at"):
-                    try:
-                        _mulai_dt = datetime.fromisoformat(_sub_info["subscribed_at"])
-                        _akhir_dt = datetime.fromisoformat(_sub_info["expires_at"])
-                        _plan_label = PLAN_LABELS.get(_sub_info["plan"], _sub_info["plan"] or "-")
-                        st.caption(
-                            f"Paket **{_plan_label}**  \n"
-                            f"Mulai: {format_tanggal_id(_mulai_dt)}  \n"
-                            f"Berakhir: {format_tanggal_id(_akhir_dt)} "
-                            f"(sisa {_sub_info['days_left']} hari)"
-                        )
-                    except (ValueError, TypeError):
-                        pass
-            else:
-                st.warning("❌ Belum berlangganan")
-            st.divider()
-            if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
-                st.session_state.active_panel = "privacy"
-                st.session_state["profile_popover_seed"] += 1
-                st.rerun()
-            if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
-                st.session_state["profile_popover_seed"] += 1
-                st.session_state.pop("auth_identifier", None)
-                st.session_state.pop("auth_display_name", None)
-                clear_login_cookie()
-                # Cegah cookie lama (yang mungkin belum sempat kehapus di
-                # browser saat rerun ini terjadi) auto-login-in kita lagi.
-                # Flag ini sekarang TIDAK langsung dibuang di rerun berikutnya
-                # -- dia dipertahankan sampai kode di atas benar-benar
-                # verifikasi cookie-nya sudah kosong (lihat blok
-                # "skip_cookie_restore" di dekat pengecekan identifier).
-                # Ini penting terutama di koneksi lambat, supaya user tidak
-                # ke-auto-login lagi walau proses hapus cookie di komponen
-                # JS-nya butuh waktu lebih dari 1 kali render.
-                st.session_state["skip_cookie_restore"] = True
-                # Jeda singkat ini cuma bantuan awal (bukan jaminan) supaya
-                # komponen cookie sempat mulai proses hapus sebelum halaman
-                # di-render ulang -- verifikasi sebenarnya tetap dilakukan
-                # lewat pengecekan cookies.get() di atas.
-                with st.spinner("Logout..."):
-                    time.sleep(0.35)
-                st.rerun()
+                if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                    st.session_state["profile_popover_seed"] += 1
+                    st.session_state.pop("auth_identifier", None)
+                    st.session_state.pop("auth_display_name", None)
+                    clear_login_cookie()
+                    # Cegah cookie lama (yang mungkin belum sempat kehapus di
+                    # browser saat rerun ini terjadi) auto-login-in kita lagi.
+                    # Flag ini sekarang TIDAK langsung dibuang di rerun berikutnya
+                    # -- dia dipertahankan sampai kode di atas benar-benar
+                    # verifikasi cookie-nya sudah kosong (lihat blok
+                    # "skip_cookie_restore" di dekat pengecekan identifier).
+                    # Ini penting terutama di koneksi lambat, supaya user tidak
+                    # ke-auto-login lagi walau proses hapus cookie di komponen
+                    # JS-nya butuh waktu lebih dari 1 kali render.
+                    st.session_state["skip_cookie_restore"] = True
+                    # Jeda singkat ini cuma bantuan awal (bukan jaminan) supaya
+                    # komponen cookie sempat mulai proses hapus sebelum halaman
+                    # di-render ulang -- verifikasi sebenarnya tetap dilakukan
+                    # lewat pengecekan cookies.get() di atas.
+                    with st.spinner("Logout..."):
+                        time.sleep(0.35)
+                    st.rerun()
 
-    if col_notif is not None:
-        with col_notif:
-            render_notification_bell(supabase_client, user_id=identifier)
-
-    # ---- baris ikon: home, portofolio, + 4 kategori -- semua jadi kotak
-    # ikon kecil (bukan teks panjang) dalam 1 baris yang sama, biar
-    # ringkas kayak yang diminta ("kotak-kotak kecil aja"). Kategori
-    # (popover) cuma nongol buat owner/active, sama kayak menu lama. ----
-    is_subscriber = status in ("owner", "active")
-    n_icons = 2 + (len(NAV_CATEGORIES) if is_subscriber else 0)
+    # ---- baris 2: nav -- Home tetap ikon, 4 kategori jadi TEKS label
+    # (tanpa ikon). Sekarang SELALU tampil semua (5 kolom), termasuk buat
+    # yang belum berlangganan -- penguncian akses kategori nanti menyusul,
+    # bukan disembunyikan dari tampilan (permintaan terbaru). ----
+    n_icons = 1 + len(NAV_CATEGORIES)
     with st.container(key="nav_icon_row"):
         icon_cols = st.columns(n_icons)
         with icon_cols[0]:
             if st.button("🏠", key="home_btn", use_container_width=True, help="Home"):
                 _go_to_dashboard()
-        with icon_cols[1]:
-            if is_subscriber:
-                if st.button("💼", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
-                    st.session_state["show_portfolio"] = True
-                    st.rerun()
-        if is_subscriber:
-            for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
-                with icon_cols[i + 2]:
-                    with st.popover(cat_icon, use_container_width=True, help=cat_name):
-                        st.caption(cat_name)
-                        for panel_key, panel_label in cat_items:
-                            if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
-                                st.session_state.active_panel = panel_key
-                                st.rerun()
+        for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
+            with icon_cols[i + 1]:
+                with st.popover(cat_name, use_container_width=True, help=cat_name):
+                    st.caption(cat_name)
+                    for panel_key, panel_label in cat_items:
+                        if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
+                            st.session_state.active_panel = panel_key
+                            st.rerun()
 
 # ---- Banner soft: sisa masa aktif <=3 hari ----
 # Sengaja diletakkan di sini (segera setelah header, SEBELUM percabangan
