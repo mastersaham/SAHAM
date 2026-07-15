@@ -529,7 +529,7 @@ st.markdown("""
     div[data-testid="stAppViewBlockContainer"],
     .block-container {
         padding-top: 2.2rem !important;
-        padding-bottom: 2rem !important;
+        padding-bottom: 5rem !important; /* ruang buat bottom bar Komunitas yang fixed */
     }
 
     /* ---------------------------------------------------------
@@ -714,27 +714,86 @@ st.markdown("""
         font-weight: 700;
         margin-right: 6px;
     }
+    /* ---------------------------------------------------------
+       HEADER BARU — sticky, 3 baris ringkas (logo diatasnya sendiri,
+       lalu notif+profil, lalu home+portofolio, lalu kategori nav).
+       Latar gelap netral (bukan oranye) supaya tombol/popover oranye
+       di dalamnya tidak "nabrak" warna dengan latar sendiri.
+    --------------------------------------------------------- */
     .st-key-header_status_bar {
         position: sticky;
         top: 0;
         z-index: 999;
-        background: linear-gradient(135deg, #ffe27a, #ffc700);
+        background: #0f1020;
         backdrop-filter: blur(6px);
-        padding: 10px 4px 6px 4px;
+        padding: 8px 8px 10px 8px;
         margin: -10px -4px 10px -4px;
-        border-bottom: 1px solid rgba(120,90,0,0.25);
-        border-radius: 0 0 18px 18px;
+        border-bottom: 1px solid rgba(255,170,60,0.22);
     }
-    /* Tombol home di dalam card kuning header -- dibikin transparan +
-       beda gaya dari tombol aksi oranye lain, biar nyatu sama warna card. */
-    .st-key-header_status_bar div.stButton > button {
-        background: rgba(255,255,255,0.35);
-        color: #3a2900;
-        box-shadow: none;
+    /* PERBAIKAN: Streamlit otomatis nge-stack st.columns jadi vertikal
+       di layar sempit (<640px), itu sebabnya header lama numpuk panjang
+       ke bawah di HP. Header ini isinya ikon/tombol pendek yang muat
+       sejajar, jadi kita paksa tetap 1 baris horizontal walau di HP. */
+    .st-key-header_status_bar div[data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        gap: 6px !important;
     }
-    .st-key-header_status_bar div.stButton > button:hover {
-        background: rgba(255,255,255,0.55);
-        transform: translateY(-1px);
+    .st-key-header_status_bar div[data-testid="column"] {
+        min-width: 0 !important;
+    }
+    .st-key-header_status_bar div.stButton > button,
+    .st-key-header_status_bar div[data-testid="stPopover"] button {
+        padding: 0.4em 0.3em;
+        font-size: 12.5px;
+    }
+    /* baris home/portofolio: netral gelap + outline oranye tipis,
+       supaya beda dari baris kategori (yang solid oranye) */
+    .st-key-nav_main_row div.stButton > button {
+        background: rgba(255,255,255,0.06) !important;
+        color: #ffb35a !important;
+        box-shadow: none !important;
+        border: 1px solid rgba(255,179,90,0.28) !important;
+    }
+    .st-key-nav_main_row div.stButton > button:hover {
+        background: rgba(255,179,90,0.12) !important;
+        transform: none !important;
+    }
+    /* baris kategori: popover solid oranye, teks gelap -- kontras jelas,
+       bukan oranye di atas oranye */
+    .st-key-nav_cat_row div[data-testid="stPopover"] button {
+        background: linear-gradient(135deg, #ffc25c, #ff8a1f) !important;
+        color: #1a0f00 !important;
+        font-weight: 700 !important;
+        border-radius: 12px !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+    .brand-icon-wrap {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 4px 0 2px 0;
+    }
+    /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan */
+    .st-key-bottom_komunitas_bar {
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 998;
+        background: linear-gradient(135deg, #ffc25c, #ff8a1f);
+        padding: 8px 16px calc(8px + env(safe-area-inset-bottom, 0px)) 16px;
+        box-shadow: 0 -10px 24px -10px rgba(0,0,0,0.55);
+    }
+    .st-key-bottom_komunitas_bar div.stButton > button {
+        background: transparent !important;
+        color: #1a0f00 !important;
+        box-shadow: none !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.3px;
+    }
+    .st-key-bottom_komunitas_bar div.stButton > button:hover {
+        transform: none !important;
+        opacity: 0.85;
     }
 
     .badge-buy { background: rgba(0,224,140,0.15); color: #00e08c; }
@@ -1005,10 +1064,14 @@ st.markdown("""
 
 st.markdown("""
 <div class="orange-topbar">
-    <div class="orange-topbar-title">
-        SYARIAH SIGNAL
+    <div class="brand-icon-wrap">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <polyline points="2,18 8,11 13,15 22,3" stroke="#ff8a1f" stroke-width="2.2"
+                stroke-linecap="round" stroke-linejoin="round"/>
+            <polyline points="15,3 22,3 22,10" stroke="#ff8a1f" stroke-width="2.2"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
     </div>
-    <div class="orange-topbar-sub">Khusus Saham Syariah, Semoga Berkah</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1418,16 +1481,40 @@ def _go_to_dashboard():
     st.rerun()
 
 
-with st.container(key="header_status_bar"):
-    if status in ("owner", "active") and supabase_client:
-        col_home, col_status, col_notif, col_portfolio = st.columns([0.5, 3.3, 0.6, 1.3])
-    else:
-        col_home, col_status, col_portfolio = st.columns([0.5, 3.7, 1.3])
-        col_notif = None
+# Dipindah ke sini (sebelumnya ada di dekat MENU_ITEMS, jauh di bawah)
+# karena sekarang baris kategori nav ada di header, yang di-render
+# duluan -- jadi active_panel harus sudah siap sebelum header dipakai.
+if "active_panel" not in st.session_state:
+    st.session_state.active_panel = None
 
-    with col_home:
-        if st.button("🏠", key="home_btn", use_container_width=True, help="Kembali ke Dashboard"):
-            _go_to_dashboard()
+# Menu lama (grid 8 tombol penuh) sekarang dikelompokkan jadi 4 kategori
+# dan ditaruh sebagai popover di baris ke-3 header, biar nggak makan
+# tempat vertikal di HP (keluhan awal: "ribet, makan tempat").
+NAV_CATEGORIES = [
+    ("📈", "Scanner", [
+        ("scan", "🔍 Scan Market"),
+        ("breakout", "🚀 Breakout Scanner"),
+        ("fake", "⚠️ Fake Breakout"),
+    ]),
+    ("📊", "Trading", [
+        ("swing", "📉 Swing Alert"),
+    ]),
+    ("🐋", "Bandar", [
+        ("bandar", "🐋 Bandar Detector"),
+        ("broker", "🏦 Broker Summary"),
+    ]),
+    ("🤖", "Otomasi", [
+        ("telegram", "📲 Send Best to TG"),
+    ]),
+]
+
+with st.container(key="header_status_bar"):
+    # ---- baris 1: notif + profil ----
+    if status in ("owner", "active") and supabase_client:
+        col_notif, col_status = st.columns([0.7, 3.3])
+    else:
+        col_notif = None
+        col_status = st.columns([4])[0]
 
     # ---- Nama profil = trigger dropdown (popover) berisi Privasi Akun
     # & Logout, biar gak makan tempat sebagai tombol terpisah-pisah di
@@ -1511,11 +1598,37 @@ with st.container(key="header_status_bar"):
     if col_notif is not None:
         with col_notif:
             render_notification_bell(supabase_client, user_id=identifier)
-    with col_portfolio:
-        if status in ("owner", "active"):
-            if st.button("📌 Portofolio Saya", use_container_width=True):
-                st.session_state["show_portfolio"] = True
-                st.rerun()
+
+    # ---- baris 2: home + portofolio ----
+    # PERBAIKAN: st.markdown('<div>...') TIDAK beneran membungkus widget
+    # di bawahnya (jadi sibling di DOM, bukan parent -- lihat catatan yang
+    # sama di render_auth_panel()). Pakai st.container(key=...) asli biar
+    # CSS ".st-key-nav_main_row ..." beneran kena ke tombol di dalamnya.
+    with st.container(key="nav_main_row"):
+        col_home, col_portfolio = st.columns([1, 1])
+        with col_home:
+            if st.button("🏠 Home", key="home_btn", use_container_width=True, help="Kembali ke Dashboard"):
+                _go_to_dashboard()
+        with col_portfolio:
+            if status in ("owner", "active"):
+                if st.button("💼 Portofolio", key="portfolio_btn", use_container_width=True):
+                    st.session_state["show_portfolio"] = True
+                    st.rerun()
+
+    # ---- baris 3: kategori nav (Scanner/Trading/Bandar/Otomasi), tiap
+    # kategori jadi popover -- tap untuk buka, isinya sub-fitur. Cuma buat
+    # owner/active, sama seperti grid menu lama yang cuma nongol setelah
+    # gerbang langganan (st.stop() di bawah). ----
+    if status in ("owner", "active"):
+        with st.container(key="nav_cat_row"):
+            cat_cols = st.columns(len(NAV_CATEGORIES))
+            for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
+                with cat_cols[i]:
+                    with st.popover(f"{cat_icon} {cat_name}", use_container_width=True):
+                        for panel_key, panel_label in cat_items:
+                            if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
+                                st.session_state.active_panel = panel_key
+                                st.rerun()
 
 # ---- Banner soft: sisa masa aktif <=3 hari ----
 # Sengaja diletakkan di sini (segera setelah header, SEBELUM percabangan
@@ -1531,6 +1644,15 @@ if status == "active":
 
 if status not in ("owner", "active"):
     st.stop()
+
+# ---- Bar Komunitas -- fixed nempel di bawah layar, tetap kelihatan di
+# halaman/panel manapun (posisinya di-pin lewat CSS position:fixed, jadi
+# taruh di sini -- di awal script, sebelum semua percabangan panel --
+# tidak masalah, dia akan tetap muncul di bawah pada tiap rerun). ----
+with st.container(key="bottom_komunitas_bar"):
+    if st.button("💬 Komunitas", key="komunitas_bottom_btn", use_container_width=True):
+        st.session_state.active_panel = "community"
+        st.rerun()
 
 # ============================================================
 #  AUTO-REFRESH CONTROL (non-blocking, TIDAK nge-freeze seluruh halaman)
@@ -2995,34 +3117,13 @@ def render_news_section():
 #      menu, dan Berita disembunyikan total selama di halaman ini.
 # Pola 1-layar-1-fungsi ini sengaja dipakai supaya gampang di-porting
 # ke navigasi tab/stack ala app Android/iOS nanti.
-if "active_panel" not in st.session_state:
-    st.session_state.active_panel = None
-
-MENU_ITEMS = [
-    ("scan", "🔍 SCAN MARKET"),
-    ("bandar", "🐋 BANDAR DETECTOR"),
-    ("breakout", "🚀 BREAKOUT SCANNER"),
-    ("swing", "📉 SWING ALERT"),
-    ("fake", "⚠️ FAKE BREAKOUT"),
-    ("telegram", "📲 SEND BEST TO TG"),
-    ("broker", "🏦 BROKER SUMMARY"),
-    ("community", "💬 KOMUNITAS"),
-]
-
 if st.session_state.active_panel is None:
     # ===================== HALAMAN: DASHBOARD =====================
+    # Menu tombol besar udah pindah ke popover kategori di header
+    # (NAV_CATEGORIES), jadi di sini langsung lompat ke Top Gainer/Loser
+    # + Berita tanpa grid tombol lagi.
     render_stock_search_bar("dashboard_search_form")
     render_top_panel()
-    st.divider()
-
-    st.markdown("#### Menu")
-    menu_cols = st.columns(4)
-    for i, (panel_key, panel_label) in enumerate(MENU_ITEMS):
-        with menu_cols[i % 4]:
-            if st.button(panel_label, use_container_width=True, key=f"menu_{panel_key}"):
-                st.session_state.active_panel = panel_key
-                st.rerun()
-
     st.divider()
     render_news_section()
 
