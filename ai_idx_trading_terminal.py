@@ -597,26 +597,20 @@ st.markdown("""
     }
 
     /* ---------------------------------------------------------
-       TOP HEADER — pita judul dengan nuansa mengambang, dreamy
+       TOP HEADER — logo teks kecil, rata kiri (bukan ikon gede
+       di tengah lagi -- kepanjangan/berat kalau di HP)
     --------------------------------------------------------- */
     .orange-topbar {
-        margin: 0 -1rem 6px -1rem;
-        padding: 4px 26px 4px 26px;
+        margin: 0 -1rem 2px -1rem;
+        padding: 2px 14px 0 14px;
         background: transparent;
-        position: relative;
-        overflow: visible;
-        text-align: center;
+        text-align: left;
     }
-    .orange-topbar-title {
-        font-size: 24px;
+    .orange-topbar-title-mini {
+        font-size: 15px;
         font-weight: 800;
         color: #ff8c00;
-        margin-top: 4px;
         letter-spacing: 0.3px;
-        line-height: 1.2;
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
     }
     .orange-topbar-sub {
         font-size: 13px;
@@ -715,10 +709,9 @@ st.markdown("""
         margin-right: 6px;
     }
     /* ---------------------------------------------------------
-       HEADER BARU — sticky, 3 baris ringkas (logo diatasnya sendiri,
-       lalu notif+profil, lalu home+portofolio, lalu kategori nav).
-       Latar gelap netral (bukan oranye) supaya tombol/popover oranye
-       di dalamnya tidak "nabrak" warna dengan latar sendiri.
+       HEADER BARU — sticky, 2 baris: notif+profil, lalu 1 baris
+       kotak ikon kecil (home, portofolio, 4 kategori). Latar gelap
+       netral supaya tombol oranye di dalamnya kontras jelas.
     --------------------------------------------------------- */
     .st-key-header_status_bar {
         position: sticky;
@@ -731,37 +724,47 @@ st.markdown("""
         border-bottom: 1px solid rgba(255,170,60,0.22);
     }
     /* PERBAIKAN: Streamlit otomatis nge-stack st.columns jadi vertikal
-       di layar sempit (<640px), itu sebabnya header lama numpuk panjang
-       ke bawah di HP. Header ini isinya ikon/tombol pendek yang muat
-       sejajar, jadi kita paksa tetap 1 baris horizontal walau di HP. */
+       di layar sempit (<640px). Header ini isinya ikon/tombol pendek
+       yang muat sejajar, jadi kita paksa tetap 1 baris horizontal. */
     .st-key-header_status_bar div[data-testid="stHorizontalBlock"] {
         flex-direction: row !important;
-        flex-wrap: nowrap !important;
+        flex-wrap: wrap !important;   /* jaring pengaman: kalau kepepet, turun baris -- bukan scroll ke samping */
         gap: 6px !important;
     }
-    .st-key-header_status_bar div[data-testid="column"] {
+    /* PERBAIKAN: sebelumnya CSS ini nargetin [data-testid="column"],
+       tapi Streamlit versi sekarang pakai "stColumn" -- jadi override-nya
+       nggak pernah kena, kolom tetap lebar sesuai teks di dalamnya
+       (itu penyebab baris kategori kepotong/scroll ke samping). Dua-duanya
+       ditarget sekarang biar aman di versi manapun. */
+    .st-key-header_status_bar div[data-testid="column"],
+    .st-key-header_status_bar div[data-testid="stColumn"] {
         min-width: 0 !important;
     }
     .st-key-header_status_bar div.stButton > button,
     .st-key-header_status_bar div[data-testid="stPopover"] button {
-        padding: 0.4em 0.3em;
-        font-size: 12.5px;
+        padding: 0.4em 0.5em !important;
+        font-size: 12.5px !important;
+        min-width: 0 !important;
     }
-    /* baris home/portofolio: netral gelap + outline oranye tipis,
-       supaya beda dari baris kategori (yang solid oranye) */
-    .st-key-nav_main_row div.stButton > button {
+    /* kotak ikon (home/portofolio/kategori): font emoji lebih besar,
+       padding lebih rapat -- ini yang bikin bentuknya kotak kecil */
+    .st-key-nav_icon_row div.stButton > button,
+    .st-key-nav_icon_row div[data-testid="stPopover"] button {
+        padding: 0.45em 0 !important;
+        font-size: 17px !important;
+    }
+    /* baris ikon: kotak-kotak kecil, bukan pil panjang. 2 ikon pertama
+       (home/portofolio) netral outline oranye, 4 sisanya (kategori)
+       solid oranye -- dibedakan lewat posisi kolom, bukan class terpisah,
+       supaya semuanya tetap 1 baris yang sama. */
+    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:nth-child(-n+2) div.stButton > button {
         background: rgba(255,255,255,0.06) !important;
         color: #ffb35a !important;
         box-shadow: none !important;
         border: 1px solid rgba(255,179,90,0.28) !important;
+        border-radius: 12px !important;
     }
-    .st-key-nav_main_row div.stButton > button:hover {
-        background: rgba(255,179,90,0.12) !important;
-        transform: none !important;
-    }
-    /* baris kategori: popover solid oranye, teks gelap -- kontras jelas,
-       bukan oranye di atas oranye */
-    .st-key-nav_cat_row div[data-testid="stPopover"] button {
+    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:nth-child(n+3) div[data-testid="stPopover"] button {
         background: linear-gradient(135deg, #ffc25c, #ff8a1f) !important;
         color: #1a0f00 !important;
         font-weight: 700 !important;
@@ -769,11 +772,10 @@ st.markdown("""
         border: none !important;
         box-shadow: none !important;
     }
-    .brand-icon-wrap {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        padding: 4px 0 2px 0;
+    /* isi popover kategori (sub-menu): tombol biasa, full width, rapi */
+    div[data-testid="stPopoverBody"] div.stButton > button {
+        font-size: 13.5px !important;
+        padding: 0.6em 0.8em !important;
     }
     /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan */
     .st-key-bottom_komunitas_bar {
@@ -1064,14 +1066,7 @@ st.markdown("""
 
 st.markdown("""
 <div class="orange-topbar">
-    <div class="brand-icon-wrap">
-        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <polyline points="2,18 8,11 13,15 22,3" stroke="#ff8a1f" stroke-width="2.2"
-                stroke-linecap="round" stroke-linejoin="round"/>
-            <polyline points="15,3 22,3 22,10" stroke="#ff8a1f" stroke-width="2.2"
-                stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-    </div>
+    <span class="orange-topbar-title-mini">Syariah Signal</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1599,32 +1594,27 @@ with st.container(key="header_status_bar"):
         with col_notif:
             render_notification_bell(supabase_client, user_id=identifier)
 
-    # ---- baris 2: home + portofolio ----
-    # PERBAIKAN: st.markdown('<div>...') TIDAK beneran membungkus widget
-    # di bawahnya (jadi sibling di DOM, bukan parent -- lihat catatan yang
-    # sama di render_auth_panel()). Pakai st.container(key=...) asli biar
-    # CSS ".st-key-nav_main_row ..." beneran kena ke tombol di dalamnya.
-    with st.container(key="nav_main_row"):
-        col_home, col_portfolio = st.columns([1, 1])
-        with col_home:
-            if st.button("🏠 Home", key="home_btn", use_container_width=True, help="Kembali ke Dashboard"):
+    # ---- baris ikon: home, portofolio, + 4 kategori -- semua jadi kotak
+    # ikon kecil (bukan teks panjang) dalam 1 baris yang sama, biar
+    # ringkas kayak yang diminta ("kotak-kotak kecil aja"). Kategori
+    # (popover) cuma nongol buat owner/active, sama kayak menu lama. ----
+    is_subscriber = status in ("owner", "active")
+    n_icons = 2 + (len(NAV_CATEGORIES) if is_subscriber else 0)
+    with st.container(key="nav_icon_row"):
+        icon_cols = st.columns(n_icons)
+        with icon_cols[0]:
+            if st.button("🏠", key="home_btn", use_container_width=True, help="Home"):
                 _go_to_dashboard()
-        with col_portfolio:
-            if status in ("owner", "active"):
-                if st.button("💼 Portofolio", key="portfolio_btn", use_container_width=True):
+        with icon_cols[1]:
+            if is_subscriber:
+                if st.button("💼", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
                     st.session_state["show_portfolio"] = True
                     st.rerun()
-
-    # ---- baris 3: kategori nav (Scanner/Trading/Bandar/Otomasi), tiap
-    # kategori jadi popover -- tap untuk buka, isinya sub-fitur. Cuma buat
-    # owner/active, sama seperti grid menu lama yang cuma nongol setelah
-    # gerbang langganan (st.stop() di bawah). ----
-    if status in ("owner", "active"):
-        with st.container(key="nav_cat_row"):
-            cat_cols = st.columns(len(NAV_CATEGORIES))
+        if is_subscriber:
             for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
-                with cat_cols[i]:
-                    with st.popover(f"{cat_icon} {cat_name}", use_container_width=True):
+                with icon_cols[i + 2]:
+                    with st.popover(cat_icon, use_container_width=True, help=cat_name):
+                        st.caption(cat_name)
                         for panel_key, panel_label in cat_items:
                             if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
                                 st.session_state.active_panel = panel_key
