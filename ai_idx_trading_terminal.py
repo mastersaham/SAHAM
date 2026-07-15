@@ -722,7 +722,7 @@ st.markdown("""
         width: 100%;
         z-index: 999;
         background: #ff8c00;
-        padding: 6px 12px 4px 12px;
+        padding: 5px 12px 2px 12px;
         margin: 0;
         box-shadow: 0 6px 18px -12px rgba(0,0,0,0.55);
     }
@@ -785,30 +785,38 @@ st.markdown("""
         justify-content: center !important;
         margin-left: auto !important;
     }
-    /* baris 2: nav -- home tetap ikon, 4 kategori jadi teks label,
-       semua di atas strip oranye yang menyambung dari baris 1 */
+    /* baris 2: nav -- semua icon-only, transparan & nyatu sama strip
+       oranye (gaya sama kayak bar "Komunitas" di bawah), ramping/tipis,
+       bukan kotak hitam gendut kayak sebelumnya */
     .st-key-nav_icon_row {
-        background: #ff8c00;
-        padding: 3px 10px 5px 10px;
-        margin: 4px -12px -4px -12px;
-        border-top: 1px solid rgba(0,0,0,0.12);
+        background: transparent;
+        padding: 2px 10px 4px 10px;
+        margin: 0 -12px -4px -12px;
+        border-top: none;
     }
     .st-key-nav_icon_row div.stButton > button,
     .st-key-nav_icon_row div[data-testid="stPopover"] button {
-        background: #1a0f00 !important;
-        color: #ff8c00 !important;
+        background: transparent !important;
+        color: #1a0f00 !important;
         font-weight: 700 !important;
-        font-size: 12px !important;
+        font-size: 17px !important;
         border-radius: 8px !important;
         border: none !important;
         box-shadow: none !important;
-        padding: 0.4em 0.2em !important;
+        padding: 0.25em 0.2em !important;
         min-width: 0 !important;
+        height: 32px !important;
+        line-height: 1 !important;
     }
-    /* kolom pertama (Home) -- ikon, warna seragam sama tombol lain */
+    .st-key-nav_icon_row div.stButton > button:hover,
+    .st-key-nav_icon_row div[data-testid="stPopover"] button:hover {
+        opacity: 0.7 !important;
+        transform: none !important;
+    }
+    /* kolom pertama (Home) -- ikon, warna & tinggi seragam sama tombol lain */
     .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
-        font-size: 16px !important;
-        background: #1a0f00 !important;
+        font-size: 17px !important;
+        background: transparent !important;
     }
     /* isi popover kategori (sub-menu): tombol biasa, full width, rapi */
     div[data-testid="stPopoverBody"] div.stButton > button {
@@ -834,6 +842,53 @@ st.markdown("""
     .st-key-bottom_komunitas_bar div.stButton > button:hover {
         transform: none !important;
         opacity: 0.85;
+    }
+
+    /* search bar cari saham -- input + tombol lekat jadi 1 pill putih,
+       bukan 2 elemen terpisah (permintaan: "jangan 2 baris/2 tombol") */
+    div[class*="search_form_wrap"] div[data-testid="stForm"] {
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stHorizontalBlock"] {
+        gap: 0 !important;
+        background: #ffffff;
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow: 0 4px 14px -8px rgba(0,0,0,0.4);
+    }
+    div[class*="search_form_wrap"] div[data-testid="stTextInput"] input {
+        background: #ffffff !important;
+        color: #1a0f00 !important;
+        border: none !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        height: 42px !important;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stTextInput"] input::placeholder {
+        color: #8a8a8a !important;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stForm"] div.stButton > button,
+    div[class*="search_form_wrap"] button[kind="formSubmit"] {
+        background: #ffffff !important;
+        color: #1a0f00 !important;
+        border: none !important;
+        border-left: 1px solid #ececec !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        height: 42px !important;
+        min-width: 0 !important;
+        font-size: 16px !important;
+    }
+
+    /* label "Top 50 Gainers/Losers" -- diperbesar buat gantiin judul besar
+       "Top Gainer/Loser" yang dihapus, jadi tetap ada penanda section jelas */
+    .gainer-loser-label {
+        font-size: 19px;
+        font-weight: 800;
+        color: #ffffff;
+        margin-bottom: 6px;
     }
 
     .badge-buy { background: rgba(0,224,140,0.15); color: #00e08c; }
@@ -1553,7 +1608,7 @@ with st.container(key="header_status_bar"):
     col_brand, col_portfolio, col_notif, col_avatar = st.columns([3.4, 0.55, 0.55, 0.7])
 
     with col_brand:
-        st.markdown('<div class="app_brand_name">Saham Syariah</div>', unsafe_allow_html=True)
+        st.markdown('<div class="app_brand_name">Syariah Signal</div>', unsafe_allow_html=True)
 
     with col_portfolio:
         if is_subscriber:
@@ -1650,7 +1705,7 @@ with st.container(key="header_status_bar"):
                 _go_to_dashboard()
         for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
             with icon_cols[i + 1]:
-                with st.popover(cat_name, use_container_width=True, help=cat_name):
+                with st.popover(cat_icon, use_container_width=True, help=cat_name):
                     st.caption(cat_name)
                     for panel_key, panel_label in cat_items:
                         if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
@@ -2108,17 +2163,18 @@ def send_telegram(msg):
 #  seperti Scan Market/Bandar/Breakout/dll -- bukan cuma di Dashboard)
 # ============================================================
 def render_stock_search_bar(form_key):
-    with st.form(form_key, clear_on_submit=False):
-        _search_col1, _search_col2 = st.columns([6, 1])
-        with _search_col1:
-            _query = st.text_input(
-                "Cari saham",
-                placeholder="Cari kode saham, mis. BBCA",
-                label_visibility="collapsed",
-                key=f"{form_key}_input",
-            )
-        with _search_col2:
-            _submitted = st.form_submit_button("🔍", use_container_width=True)
+    with st.container(key=f"{form_key}_wrap"):
+        with st.form(form_key, clear_on_submit=False):
+            _search_col1, _search_col2 = st.columns([6, 1], gap="small")
+            with _search_col1:
+                _query = st.text_input(
+                    "Cari saham",
+                    placeholder="Cari kode saham, mis. BBCA",
+                    label_visibility="collapsed",
+                    key=f"{form_key}_input",
+                )
+            with _search_col2:
+                _submitted = st.form_submit_button("🔍", use_container_width=True)
     if _submitted and _query.strip():
         st.query_params["stock"] = _query.strip().upper()
         st.rerun()
@@ -3001,7 +3057,6 @@ def render_top_panel():
 
     df_scan_preview = st.session_state.scan_df
     if df_scan_preview is not None and not df_scan_preview.empty:
-        st.markdown("#### 📈 Top Gainer / 📉 Top Loser")
         ranked = df_scan_preview.sort_values("change_pct", ascending=False)
         # PERBAIKAN: tampung sampai 50 saham per panel (bukan cuma 3), tapi
         # dibungkus container scroll biar tinggi UI tetap cuma ~5 baris kelihatan.
@@ -3021,10 +3076,10 @@ def render_top_panel():
 
         gcol, lcol = st.columns(2)
         with gcol:
-            st.markdown("**Top Gainers**")
+            st.markdown('<div class="gainer-loser-label">Top 50 Gainers</div>', unsafe_allow_html=True)
             st.markdown(_render_scroll_list(gainers), unsafe_allow_html=True)
         with lcol:
-            st.markdown("**Top Losers**")
+            st.markdown('<div class="gainer-loser-label">Top 50 Losers</div>', unsafe_allow_html=True)
             st.markdown(_render_scroll_list(losers), unsafe_allow_html=True)
 
 
