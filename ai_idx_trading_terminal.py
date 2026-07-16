@@ -3046,12 +3046,19 @@ def render_stock_detail_page(ticker_raw):
         scols[1].metric("TP", scan_row["tp"])
         scols[2].metric("SL", scan_row["sl"])
         scols[3].metric("Score", scan_row["score"])
+        st.caption(
+            "📈 Trend & Score di atas dipakai untuk label prediksi arah "
+            "di panel Top Gainers/Losers. Kartu di bawah ini beda -- itu "
+            "cuma bacaan kondisi HARI INI (candle terakhir), bukan prediksi."
+        )
         st.markdown(
-            f'<div class="card">Trend: <b>{scan_row["trend"]}</b> &nbsp;•&nbsp; '
+            f'<div class="card">🗓️ <b>Kondisi Hari Ini</b> (bukan prediksi besok) &nbsp;•&nbsp; '
             f'Bandar: <b>{scan_row["bandar"]}</b> &nbsp;•&nbsp; '
             f'Swing Drop: <b>{"Ya" if scan_row["swing"] else "Tidak"} '
             f'({scan_row["drop"]}%)</b> &nbsp;•&nbsp; '
-            f'Fake Breakout: <b>{"Ya" if scan_row["fake_breakout"] else "Tidak"}</b></div>',
+            f'Fake Breakout: <b>{"Ya" if scan_row["fake_breakout"] else "Tidak"}</b> &nbsp;•&nbsp; '
+            f'Climax Risk: <b>{"Ya" if scan_row["climax_risk"] else "Tidak"}</b> &nbsp;•&nbsp; '
+            f'Weak Close: <b>{"Ya" if scan_row["weak_close"] else "Tidak"}</b></div>',
             unsafe_allow_html=True,
         )
 
@@ -3170,42 +3177,52 @@ def render_top_panel():
         losers = ranked.tail(50).sort_values("change_pct")
 
         def _gainer_loser_label(r):
-            """Label singkat status gainer/loser, gabungan trend+bandar+
-            signal+fake_breakout+climax_risk+weak_close yang UDAH ADA di
-            scan_df (belum termasuk foreign flow -- itu masih terkunci,
-            lihat panel Broker Summary). bandar itu snapshot HARI INI aja
-            (volume spike + arah harga), bukan pola akumulasi/distribusi
-            multi-hari. climax_risk & weak_close BUKAN prediksi gap besok
-            pagi -- cuma baca kelemahan closing hari ini (upper/lower wick
-            + volume), bukan jaminan."""
+            """Label PREDIKSI ARAH KEDEPAN untuk panel Top Gainers/Losers --
+            bukan lagi deskripsi 'apa yang lagi terjadi hari ini'.
+
+            Dipakai: `trend` (EMA20 vs EMA50 -- struktur menengah, beberapa
+            minggu) + `signal`/skor gabungan (RSI, MACD, ADX, Bollinger,
+            VWAP, Fibonacci, breakout, jarak ke support -- lihat scoring()
+            di scan_engine.py). Keduanya dihitung dari histori multi-hari,
+            jadi punya bobot forward-looking yang lebih masuk akal
+            dibanding baca 1 candle terakhir doang.
+
+            SENGAJA tidak dipakai lagi di sini: `bandar` (AKUMULASI/
+            DISTRIBUSI/MARKUP -- snapshot volume+harga HARI INI aja),
+            `fake_breakout`, `climax_risk`, `weak_close` (semua baca
+            kelemahan/pola closing HARI INI, bukan prediksi besok). Semua
+            itu sekarang cuma tampil di halaman Detail Saham (klik nama
+            saham) sebagai 'Kondisi Hari Ini'.
+
+            CATATAN: ini tetap bias probabilistik dari struktur teknikal
+            terakhir, BUKAN jaminan/ramalan pasti."""
             chg = r.get("change_pct", 0) or 0
-            bandar = str(r.get("bandar", "NETRAL"))
             trend = str(r.get("trend", ""))
             sig = str(r.get("signal", ""))
-            fake_break = bool(r.get("fake_breakout", False))
-            climax_risk = bool(r.get("climax_risk", False))
-            weak_close = bool(r.get("weak_close", False))
+            bullish = "Bullish" in trend
+            bearish = "Bearish" in trend
+            is_buy = "BUY" in sig  # cocok utk "BUY" & "STRONG BUY 🚀"
+            is_sell = "SELL" in sig
+            is_hold = "HOLD" in sig
 
             if chg >= 0:
-                if climax_risk:
-                    return "gl-bad", "🔴 Rawan Anjlok"
-                if fake_break:
-                    return "gl-warn", "🟠 Hati-hati Bantingan"
-                if "MARKUP" in bandar and "BUY" in sig:
-                    return "gl-good", "🟢 Lanjut Naik"
-                if "NETRAL" in bandar and ("SELL" in sig or "HOLD" in sig):
-                    return "gl-caution", "🟡 Naik Tanpa Volume"
-                if "Bearish" in trend:
+                if bearish and is_sell:
+                    return "gl-bad", "🔴 Rawan Balik Turun"
+                if bearish:
                     return "gl-warn", "🟠 Rawan Balik Turun"
-                return "gl-neutral", "⚪ Pantau"
+                if bullish and is_buy:
+                    return "gl-good", "🟢 Berpotensi Lanjut Naik"
+                if bullish and is_hold:
+                    return "gl-caution", "🟡 Momentum Melemah"
+                return "gl-neutral", "⚪ Netral"
             else:
-                if weak_close:
-                    return "gl-bad", "🔴 Rawan Lanjut Turun"
-                if "DISTRIBUSI" in bandar and "SELL" in sig:
-                    return "gl-bad", "🔴 Tekanan Jual"
-                if "NETRAL" in bandar and "Bullish" in trend and ("BUY" in sig or "HOLD" in sig):
+                if bullish and (is_buy or is_hold):
                     return "gl-rebound", "🔵 Potensi Rebound"
-                return "gl-neutral", "⚪ Pantau"
+                if bearish and is_sell:
+                    return "gl-bad", "🔴 Berpotensi Lanjut Turun"
+                if bearish:
+                    return "gl-warn", "🟠 Rawan Lanjut Tertekan"
+                return "gl-neutral", "⚪ Netral"
 
         def _render_scroll_list(rows):
             items_html = "".join(
@@ -3221,6 +3238,11 @@ def render_top_panel():
             )
             return f'<div class="scroll-list">{items_html}</div>'
 
+        st.caption(
+            "🔮 Label di bawah ini prediksi arah KEDEPAN berdasarkan trend "
+            "& skor teknikal (bukan jaminan). Kondisi hari ini (bandar, "
+            "fake breakout, dll) ada di halaman Detail Saham -- klik nama sahamnya."
+        )
         gcol, lcol = st.columns(2)
         with gcol:
             st.markdown('<div class="gainer-loser-label">Top 50 Gainers</div>', unsafe_allow_html=True)
