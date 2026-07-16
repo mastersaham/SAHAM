@@ -539,13 +539,28 @@ st.markdown("""
         padding-bottom: 3.6rem !important; /* ruang buat bottom bar Komunitas yang fixed (sekarang lebih tipis) */
     }
 
-    /* PERBAIKAN: st.subheader() bawaan Streamlit (h3) kegedean menurut
-       user -- dikecilkan secara GLOBAL (semua halaman, termasuk Detail
-       Saham, Screener, Bandar, dst pakai elemen yang sama, jadi diseragamkan
-       satu ukuran biar konsisten). */
+    /* PERBAIKAN: samakan ukuran SEMUA st.subheader() (h3) -- Screener,
+       Bandar, Breakout, Swing, Berita, dll -- persis kayak ukuran label
+       "Top 50 Gainers/Losers" (.gainer-loser-label, 22px/800) biar semua
+       judul halaman seragam satu ukuran, gak ada yang keliatan mini
+       sendiri dibanding yang lain. */
     div[data-testid="stMarkdownContainer"] h3 {
-        font-size: 1.05rem !important;
-        line-height: 1.4 !important;
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.3 !important;
+    }
+
+    /* PERBAIKAN: di halaman fitur (Screener/Bandar/Breakout/Swing/dst),
+       judul halaman (subheader) adalah elemen PERTAMA yang dirender --
+       dulu ada tombol "Kembali" + divider di atasnya yang ngisi jarak ke
+       header, sekarang keduanya sudah dihapus jadi ada ruang kosong
+       nganggur. Ditarik naik di sini, sama semangatnya kayak search bar
+       dashboard yang juga ditarik naik (lihat aturan search_form_wrap).
+       Selector ini cuma kena kalau subheader = elemen PERTAMA di
+       halaman, jadi aman -- dashboard (elemen pertamanya search bar,
+       bukan subheader) tidak ikut ketarik. */
+    div[data-testid="stAppViewBlockContainer"] > div[data-testid="stVerticalBlock"] > div.element-container:first-of-type h3 {
+        margin-top: -46px !important;
     }
 
     /* ---------------------------------------------------------
@@ -587,6 +602,44 @@ st.markdown("""
     }
     .scan-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
     .scan-table tbody tr:hover { background: rgba(255,179,90,0.06); }
+
+    /* PERBAIKAN: freeze kolom NO + STOCK (2 kolom pertama) supaya pas
+       tabel digeser kanan-kiri buat lihat kolom lain (PRICE, CHANGE PCT,
+       dst), NO+STOCK tetap nempel di kiri -- gak ikut kegeser. Dipakai
+       bareng di semua tabel yang lewat render_html_table (Screener,
+       Breakout, Fake Breakout, Swing Alert). Scroll atas-bawah tabel ini
+       sendiri sudah terpisah dari scroll halaman (lihat .scan-table-wrap
+       overflow-y:auto + max-height di atas), jadi geser tabel gak ikut
+       menggeser seluruh halaman.
+       Catatan: karena butuh background solid biar kolom yang lewat di
+       belakangnya kepotong rapi, baris ganjil/genap (nth-child even)
+       jadi nggak keliatan di 2 kolom ini -- cuma di kolom lainnya. */
+    .scan-table th:nth-child(1),
+    .scan-table td:nth-child(1) {
+        position: sticky;
+        left: 0;
+        width: 44px;
+        min-width: 44px;
+        max-width: 44px;
+    }
+    .scan-table th:nth-child(2),
+    .scan-table td:nth-child(2) {
+        position: sticky;
+        left: 44px;
+        width: 92px;
+        min-width: 92px;
+        max-width: 92px;
+    }
+    .scan-table thead th:nth-child(1),
+    .scan-table thead th:nth-child(2) {
+        z-index: 3; /* pojok kiri-atas -- di atas header biasa & kolom beku badan tabel */
+    }
+    .scan-table tbody td:nth-child(1),
+    .scan-table tbody td:nth-child(2) {
+        z-index: 1;
+        background: #14152a; /* solid, biar kolom lain yang lewat di belakang kepotong rapi */
+        border-right: 1px solid rgba(255,179,90,0.18); /* pembatas tipis: ini kolom beku, sisanya bisa digeser */
+    }
     .stock-link,
     [data-testid="stMarkdownContainer"] a.stock-link,
     [data-testid="stMarkdownContainer"] a.stock-link:link,
