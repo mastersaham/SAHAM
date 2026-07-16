@@ -673,6 +673,27 @@ st.markdown("""
     }
     .update-strip b { color: #f3f2ef; }
 
+    /* Tombol "Back" (dulu "Kembali") di berbagai halaman -- disamain
+       gayanya kayak tombol popover: solid oranye flat, tanpa gradient
+       & tanpa glow/shadow mengambang kayak tombol aksi umum lainnya. */
+    .st-key-back_from_portfolio button,
+    .st-key-back_from_customer_panel button,
+    .st-key-back_from_stock_detail button,
+    .st-key-back_to_dashboard_btn button,
+    .st-key-back_to_dashboard_btn_bottom button {
+        background: #ff8c00 !important;
+        box-shadow: none !important;
+    }
+    .st-key-back_from_portfolio button:hover,
+    .st-key-back_from_customer_panel button:hover,
+    .st-key-back_from_stock_detail button:hover,
+    .st-key-back_to_dashboard_btn button:hover,
+    .st-key-back_to_dashboard_btn_bottom button:hover {
+        background: #e67e00 !important;
+        box-shadow: none !important;
+        transform: none !important;
+    }
+
     /* action buttons — pil oranye-kuning cerah, mengambang dengan glow */
     div.stButton > button {
         width: 100%;
@@ -899,10 +920,21 @@ st.markdown("""
     .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
         background: transparent !important;
     }
-    /* isi popover kategori (sub-menu): tombol biasa, full width, rapi */
+    /* isi popover kategori (sub-menu): tombol biasa, full width, rapi.
+       PERBAIKAN: sebelumnya ikut gaya tombol umum (gradient oranye-kuning
+       + glow/shadow mengambang) -- kelihatan terlalu "nyala" & gak
+       konsisten buat menu sub-kategori. Sekarang solid flat oranye polos
+       (senada sama warna brand header), tanpa gradient & tanpa glow. */
     div[data-testid="stPopoverBody"] div.stButton > button {
         font-size: 13.5px !important;
         padding: 0.6em 0.8em !important;
+        background: #ff8c00 !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stPopoverBody"] div.stButton > button:hover {
+        background: #e67e00 !important;
+        box-shadow: none !important;
+        transform: none !important;
     }
     /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan.
        PERBAIKAN: masih ketinggian -- tombolnya masih ikut padding gede
@@ -2483,7 +2515,7 @@ def render_portfolio_page(user_db, identifier, display_name):
     ISSI, dan data dasar SAJA (harga + %harian) untuk saham non-syariah,
     tanpa sinyal/rekomendasi apa pun untuk yang non-syariah."""
     st.markdown(f"### 📌 Portofolio Saya — {display_name}")
-    if st.button("← Kembali"):
+    if st.button("← Back", key="back_from_portfolio"):
         st.session_state["show_portfolio"] = False
         st.rerun()
 
@@ -2608,7 +2640,7 @@ def render_customer_panel(user_db):
     dipakai selama Stripe belum live / untuk koreksi manual selagi app
     belum dibuka ke umum."""
     st.markdown("### 🗂️ Kelola Pelanggan")
-    if st.button("← Kembali", key="back_from_customer_panel"):
+    if st.button("← Back", key="back_from_customer_panel"):
         st.session_state["show_customer_panel"] = False
         st.rerun()
 
@@ -2888,7 +2920,7 @@ def render_stock_detail_page(ticker_raw):
     ticker_no_jk = str(ticker_raw).upper().strip().replace(".JK", "")
     ticker_jk = f"{ticker_no_jk}.JK"
 
-    if st.button("⬅ Kembali"):
+    if st.button("⬅ Back", key="back_from_stock_detail"):
         # Cuma hapus query param "?stock=..." -- state navigasi lain
         # (show_portfolio/show_customer_panel/active_panel) SENGAJA
         # dibiarkan apa adanya, supaya tombol ini balik ke halaman ASAL
@@ -3497,7 +3529,7 @@ if st.session_state.active_panel is None:
 else:
     # ===================== HALAMAN: FITUR =====================
     _panel = st.session_state.active_panel
-    if st.button("⬅ Kembali", key="back_to_dashboard_btn"):
+    if st.button("⬅ Back", key="back_to_dashboard_btn"):
         st.session_state.active_panel = None
         st.rerun()
     st.divider()
@@ -3686,7 +3718,7 @@ else:
     # ---- Tombol kembali kedua di bawah, biar gak perlu scroll ke atas
     # lagi di halaman yang tabelnya panjang. ----
     st.divider()
-    if st.button("⬅ Kembali", key="back_to_dashboard_btn_bottom"):
+    if st.button("⬅ Back", key="back_to_dashboard_btn_bottom"):
         st.session_state.active_panel = None
         st.rerun()
 
