@@ -550,16 +550,20 @@ st.markdown("""
         line-height: 1.3 !important;
     }
 
-    /* PERBAIKAN: di halaman fitur (Screener/Bandar/Breakout/Swing/dst),
-       judul halaman (subheader) adalah elemen PERTAMA yang dirender --
-       dulu ada tombol "Kembali" + divider di atasnya yang ngisi jarak ke
-       header, sekarang keduanya sudah dihapus jadi ada ruang kosong
-       nganggur. Ditarik naik di sini, sama semangatnya kayak search bar
-       dashboard yang juga ditarik naik (lihat aturan search_form_wrap).
-       Selector ini cuma kena kalau subheader = elemen PERTAMA di
-       halaman, jadi aman -- dashboard (elemen pertamanya search bar,
-       bukan subheader) tidak ikut ketarik. */
-    div[data-testid="stAppViewBlockContainer"] > div[data-testid="stVerticalBlock"] > div.element-container:first-of-type h3 {
+    /* PERBAIKAN (revisi): di halaman fitur (Screener/Bandar/Breakout/
+       Swing/dst) dan halaman Portofolio, judul adalah elemen PERTAMA yang
+       kelihatan -- ada ruang kosong nganggur di atasnya yang perlu
+       ditarik naik. Sebelumnya dipakai selector ":first-of-type" tapi
+       itu TIDAK PERNAH KENA, karena header (.st-key-header_status_bar)
+       dan bottom bar Komunitas (.st-key-bottom_komunitas_bar) sama-sama
+       position:fixed -- posisinya lepas dari alur halaman, TAPI secara
+       DOM tetap dihitung sebagai "elemen pertama/kedua", jadi subheader
+       fitur itu sebenarnya bukan first-of-type sungguhan. Sekarang
+       ditarget LANGSUNG lewat container key "panel_header_tight" yang
+       dibungkus manual persis di titik judul tiap halaman fitur & judul
+       Portofolio dirender (lihat pemakaian _tight_subheader() di bawah) --
+       jadi dijamin kena, gak tergantung tebak-tebakan urutan DOM lagi. */
+    .st-key-panel_header_tight {
         margin-top: -46px !important;
     }
 
@@ -1224,6 +1228,25 @@ st.markdown("""
         padding: 9px 12px;
         border-bottom: 1px solid rgba(255,255,255,0.05);
         color: #f3f2ef;
+    }
+    /* PERBAIKAN BUG: aturan ".portfolio-table td" di atas (specificity
+       1 class + 1 elemen) ternyata lebih spesifik daripada ".gain-up" /
+       ".gain-down" (cuma 1 class), jadi walau sel tabel Portofolio sudah
+       dikasih class gain-up/gain-down, warnanya ketiban putih (#f3f2ef)
+       terus -- %HARI INI dan %MINGGU INI jadi gak pernah kelihatan hijau/
+       merah. Ditambah override eksplisit di sini (target ".portfolio-table
+       td.gain-up" biar specificity-nya menang). */
+    .portfolio-table td.gain-up { color: #00e08c; }
+    .portfolio-table td.gain-down { color: #ff5252; }
+    /* Baris saham non-syariah: satu sel lebar penuh "TIDAK SYARIAH"
+       dengan background merah transparan pudar, gantiin kolom-kolom
+       harga/score/status/bandar yang isinya cuma "–" semua. */
+    .portfolio-table td.nonsyariah-cell {
+        background: rgba(255,82,82,0.12);
+        color: #ff8a8a;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
     }
     .broker-chip {
         display: inline-block;
@@ -2198,6 +2221,16 @@ with st.container(key="header_status_bar"):
                 with st.popover(cat_name.upper(), use_container_width=True, help=cat_name, key=_cat_popover_key):
                     for panel_key, panel_label in cat_items:
                         if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
+                            # PERBAIKAN BUG: sebelumnya cuma set active_panel,
+                            # jadi kalau lagi di halaman Portofolio/Customer
+                            # Panel (show_portfolio / show_customer_panel True),
+                            # klik menu Scanner/Trading/Bandar/Alert TIDAK
+                            # NGARUH -- karena kedua flag itu punya prioritas
+                            # render lebih tinggi & gak pernah direset di sini
+                            # (beda dari tombol HOME yang resetnya lengkap,
+                            # lihat _go_to_dashboard()). Disamakan sekarang.
+                            st.session_state["show_portfolio"] = False
+                            st.session_state["show_customer_panel"] = False
                             st.session_state.active_panel = panel_key
                             st.session_state[_seed_state_key] += 1
                             st.rerun()
@@ -2223,6 +2256,11 @@ if status not in ("owner", "active"):
 # tidak masalah, dia akan tetap muncul di bawah pada tiap rerun). ----
 with st.container(key="bottom_komunitas_bar"):
     if st.button("💬 Komunitas", key="komunitas_bottom_btn", use_container_width=True):
+        # PERBAIKAN BUG: sama seperti tombol nav popover di atas -- tanpa
+        # ini, klik "Komunitas" gak ngaruh kalau lagi di halaman
+        # Portofolio/Customer Panel.
+        st.session_state["show_portfolio"] = False
+        st.session_state["show_customer_panel"] = False
         st.session_state.active_panel = "community"
         st.rerun()
 
@@ -2699,23 +2737,31 @@ def render_portfolio_page(user_db, identifier, display_name):
     lengkap (harga, %harian, %mingguan, sinyal, status bandar) untuk saham
     ISSI, dan data dasar SAJA (harga + %harian) untuk saham non-syariah,
     tanpa sinyal/rekomendasi apa pun untuk yang non-syariah."""
-    st.markdown(f"### 📌 Portofolio Saya — {display_name}")
+    with st.container(key="panel_header_tight"):
+        st.markdown("### 💼 Portofolio Saya")
 
     st.markdown(
-        '<div class="auth-caption">Tambahkan kode saham yang kamu pantau. '
+        '<div class="disclaimer-wrap">'
+        '<input type="checkbox" id="portfolio-disclaimer-toggle" class="disclaimer-checkbox">'
+        '<label for="portfolio-disclaimer-toggle" class="disclaimer-icon">ℹ️ Tentang portofolio ini</label>'
+        '<label for="portfolio-disclaimer-toggle" class="disclaimer-backdrop"></label>'
+        '<div class="disclaimer-popup">Tambahkan kode saham yang kamu pantau. '
         'Saham ISSI (syariah) dapat data lengkap; saham non-syariah cuma '
-        'ditampilkan harga & perubahan harian, tanpa sinyal/rekomendasi.</div>',
+        'ditampilkan harga &amp; perubahan harian, tanpa sinyal/rekomendasi.'
+        '<br><span class="disclaimer-hint">Tap di luar kotak buat tutup</span></div>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
-    with st.form("form_add_portfolio", clear_on_submit=True):
-        col_add_input, col_add_btn = st.columns([4, 1])
-        with col_add_input:
-            new_code = st.text_input(
-                "Tambah kode saham", placeholder="Contoh: ICBP", label_visibility="collapsed"
-            )
-        with col_add_btn:
-            submit_add = st.form_submit_button("➕ Tambah", use_container_width=True)
+    with st.container(key="portfolio_add_search_form_wrap"):
+        with st.form("form_add_portfolio", clear_on_submit=True):
+            col_add_input, col_add_btn = st.columns([6, 1])
+            with col_add_input:
+                new_code = st.text_input(
+                    "Tambah kode saham", placeholder="Contoh: ICBP", label_visibility="collapsed"
+                )
+            with col_add_btn:
+                submit_add = st.form_submit_button("➕", use_container_width=True, help="Tambah ke portofolio")
 
     if submit_add:
         ok, err = add_to_portfolio(user_db, identifier, new_code)
@@ -2759,18 +2805,19 @@ def render_portfolio_page(user_db, identifier, display_name):
                 bandar_txt = "–"
                 row_cls = ""
         else:
-            quote = get_quick_quote_cached(ticker_jk)
-            row_cls = "portfolio-row-nonsyariah"
-            if quote:
-                price = format_harga(quote['price'])
-                daily = quote["change_pct"]
-                daily_cls = "gain-up" if daily >= 0 else "gain-down"
-            else:
-                price, daily, daily_cls = "–", None, ""
-            score_txt = "–"
-            weekly_txt, weekly_cls = "–", ""
-            sig_html = '<span class="badge badge-nonsyariah">⚠️ BUKAN SYARIAH</span>'
-            bandar_txt = "–"
+            # PERBAIKAN: sebelumnya baris non-syariah masih nampilin
+            # harga/%harian per kolom (isinya sering "–" semua kalau quote
+            # gagal diambil, kelihatan kosong/bingung). Sekarang disatukan
+            # jadi 1 sel lebar penuh bertuliskan "TIDAK SYARIAH" dengan
+            # tint merah transparan (lihat CSS .nonsyariah-cell) -- kode
+            # sahamnya sendiri tetap ditampilkan & tetap bisa diklik.
+            rows_html.append(
+                f'<tr>'
+                f'<td><a class="stock-link" href="?stock={ticker_jk}" target="_self"><b>{code}</b></a></td>'
+                f'<td class="nonsyariah-cell" colspan="6">⚠️ TIDAK SYARIAH — tanpa data &amp; sinyal</td>'
+                f'</tr>'
+            )
+            continue
 
         daily_txt = f"{daily:+.2f}%" if daily is not None else "–"
         rows_html.append(
@@ -3668,6 +3715,18 @@ def render_news_section():
             _render_news_cards(general_news_items, show_stock_tag=False)
 
 
+def _tight_subheader(text: str):
+    """st.subheader() yang dibungkus container key "panel_header_tight" --
+    dipakai KHUSUS buat judul yang jadi elemen PERTAMA kelihatan di
+    halaman fitur (Screener/Bandar/Breakout/dst), biar jarak kosong ke
+    header di atasnya dirapetin (lihat CSS .st-key-panel_header_tight).
+    JANGAN dipakai buat subheader yang bukan elemen pertama di halaman
+    (mis. "Info Fundamental" di halaman detail saham, yang emang didahului
+    chart harga) -- itu tetap pakai st.subheader() biasa."""
+    with st.container(key="panel_header_tight"):
+        st.subheader(text)
+
+
 # ============================================================
 # ============================================================
 #  NAVIGASI HALAMAN — dashboard vs halaman fitur terpisah
@@ -3699,7 +3758,7 @@ else:
     # ---- SCAN MARKET : tabel penuh, semua saham, semua metrik ----
     if _panel == "scan":
         df_scan = ensure_scanned()
-        st.subheader("📊 Hasil Scan Penuh")
+        _tight_subheader("📊 Hasil Scan Penuh")
         df_display = df_scan.copy()
         # PERBAIKAN: urutan kolom dipaksa eksplisit di sini -- data hasil
         # scan disimpan sebagai jsonb di Supabase, dan Postgres TIDAK
@@ -3716,18 +3775,11 @@ else:
         df_display = df_display[_cols_present + _cols_leftover]
         df_display["stock"] = df_display["stock"].apply(_display_ticker)
         render_html_table(df_display)
-        if not df_scan.empty:
-            best = df_scan.iloc[0]
-            st.markdown(
-                f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
-                f'{signal_badge(best["signal"])} @ {format_harga(best["price"])}</div>',
-                unsafe_allow_html=True,
-            )
 
     # ---- BANDAR DETECTOR : hanya saham dengan aktivitas bandar non-netral ----
     elif _panel == "bandar":
         df_scan = ensure_scanned()
-        st.subheader("🐋 Deteksi Aktivitas Bandar")
+        _tight_subheader("🐋 Deteksi Aktivitas Bandar")
         bandar_hits = df_scan[df_scan["bandar"] != "NETRAL"]
         if bandar_hits.empty:
             st.info("Tidak ada aktivitas bandar signifikan hari ini.")
@@ -3742,7 +3794,7 @@ else:
     # ---- BREAKOUT SCANNER : saham dengan breakout valid ----
     elif _panel == "breakout":
         df_scan = ensure_scanned()
-        st.subheader("🚀 Saham Breakout Valid")
+        _tight_subheader("🚀 Saham Breakout Valid")
         breakouts = df_scan[df_scan["score"] >= 50]
         if breakouts.empty:
             st.info("Belum ada breakout kuat terdeteksi.")
@@ -3754,7 +3806,7 @@ else:
     # ---- SWING ALERT : saham yang drop >25% dari swing high ----
     elif _panel == "swing":
         df_scan = ensure_scanned()
-        st.subheader("📉 Swing Drop Alert (>25% dari high)")
+        _tight_subheader("📉 Swing Drop Alert (>25% dari high)")
         swing_hits = df_scan[df_scan["swing"] == True]
         if swing_hits.empty:
             st.info("Tidak ada saham dengan swing drop signifikan.")
@@ -3766,7 +3818,7 @@ else:
     # ---- FAKE BREAKOUT : breakout yang baru saja gagal ----
     elif _panel == "fake":
         df_scan = ensure_scanned()
-        st.subheader("⚠️ Fake Breakout Warning")
+        _tight_subheader("⚠️ Fake Breakout Warning")
         fake_hits = df_scan[df_scan["fake_breakout"] == True]
         if fake_hits.empty:
             st.info("Tidak ada fake breakout terdeteksi saat ini.")
@@ -3778,7 +3830,7 @@ else:
     # ---- SEND BEST TO TELEGRAM : sekarang halaman sendiri dengan tombol
     # konfirmasi terpisah, biar gak kekirim gak sengaja. ----
     elif _panel == "telegram":
-        st.subheader("📲 Kirim Best Pick ke Telegram")
+        _tight_subheader("📲 Kirim Best Pick ke Telegram")
         df_scan = ensure_scanned()
         if df_scan.empty:
             st.warning("Belum ada data untuk dikirim.")
@@ -3805,7 +3857,7 @@ else:
     # ---- BROKER SUMMARY : kode broker + volume beli/jual per saham,
     # khusus data EOD (update setelah bursa tutup). ----
     elif _panel == "broker":
-        st.subheader("🏦 Broker Summary (Data EOD)")
+        _tight_subheader("🏦 Broker Summary (Data EOD)")
 
         _goapi_configured = _broker_data_available()
 
@@ -3846,7 +3898,7 @@ else:
     # notif sudah dipasang di header. Panel ini hanya untuk user aktif/owner
     # (sudah dijamin karena st.stop() di atas kalau bukan owner/active). ----
     elif _panel == "community":
-        st.subheader("💬 Komunitas SahamPro")
+        _tight_subheader("💬 Komunitas SahamPro")
         if not supabase_client:
             st.warning(
                 "Community Feed belum aktif — SUPABASE_URL / SUPABASE_SERVICE_KEY "
@@ -3860,7 +3912,7 @@ else:
     # privasi lebih detail (export data, hapus akun, dst) bisa
     # ditambahkan di sini nanti tanpa ubah struktur navigasi. ----
     elif _panel == "privacy":
-        st.subheader("🔒 Privasi Akun")
+        _tight_subheader("🔒 Privasi Akun")
         st.markdown(
             f'<div class="card">'
             f'<b>Username:</b> {display_name}<br>'
