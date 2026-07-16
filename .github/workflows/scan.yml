@@ -16,11 +16,20 @@ name: Scan Saham Terpusat
 #
 # Bisa juga dipicu manual lewat tab "Actions" di GitHub -> pilih
 # workflow ini -> "Run workflow" (ini selalu boleh, kapan saja).
+#
+# TAMBAHAN: "repository_dispatch" -- trigger presisi dari LUAR GitHub,
+# dipicu oleh pg_cron di Supabase (jadwal cron bawaan GitHub Actions
+# di atas ternyata sering meleset/ke-skip krn antrian shared runner --
+# jadi Supabase yang "nyubit" workflow ini via API GitHub tiap 30 menit,
+# lebih presisi karena pg_cron jalan native di database). event_type
+# harus sama persis dengan yang dikirim dari sisi Supabase.
 on:
   schedule:
     - cron: "*/30 2-8 * * 1-5"
     - cron: "30 9 * * 1-5"
   workflow_dispatch: {}
+  repository_dispatch:
+    types: [scan-saham-trigger]
 
 # PENTING: job ini sekarang juga fetch histori/fundamental/berita/broker
 # (bukan cuma skor & sinyal), jadi durasinya bisa lebih lama dari 15
