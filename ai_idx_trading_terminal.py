@@ -529,7 +529,7 @@ st.markdown("""
     div[data-testid="stAppViewBlockContainer"],
     .block-container {
         padding-top: 6rem !important; /* ruang buat header (2 baris + label nav) yang sekarang fixed */
-        padding-bottom: 5rem !important; /* ruang buat bottom bar Komunitas yang fixed */
+        padding-bottom: 3.6rem !important; /* ruang buat bottom bar Komunitas yang fixed (sekarang lebih tipis) */
     }
 
     /* ---------------------------------------------------------
@@ -595,15 +595,6 @@ st.markdown("""
         50%  { opacity: 0.9; }
         100% { opacity: 0.55; }
     }
-
-    /* ---------------------------------------------------------
-       ICON FONT — Material Symbols Outlined (Google Fonts). Dipakai
-       supaya semua icon header (home, wallet, notif, avatar, kategori
-       nav) jadi vector minimalis yang konsisten, bukan emoji lawas
-       (yang di beberapa browser/HP suka fallback jadi kotak hitam
-       "tofu" kalau emoji-nya gak dikenali font sistem). ----------
-    --------------------------------------------------------- */
-    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..600,0,0&display=swap');
 
     /* ---------------------------------------------------------
        TOP HEADER — logo teks kecil, rata kiri (bukan ikon gede
@@ -771,30 +762,34 @@ st.markdown("""
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    /* tombol ikon polos (portofolio, avatar) di baris 1 -- transparan,
-       cuma ikon gelap, tanpa kotak/border, senada sama baris nav di
-       bawahnya (Scanner/Trading/Bandar/Alert). Font Material Symbols
-       dipasang di sini juga supaya ligature ("home", "person", dst)
-       ke-render sebagai icon vector, bukan teks polos. */
+    /* tombol teks (Portofolio) di baris 1 -- transparan, teks kapital
+       kecil-bold, tanpa kotak/border, senada sama baris nav di bawahnya
+       (HOME/SCANNER/TRADING/BANDAR/ALERT). PERBAIKAN: pendekatan icon
+       font (Material Symbols) dibuang -- fontnya gagal ke-load di
+       beberapa koneksi, hasilnya malah teks ligature mentah ("account_
+       balance_wallet") yang kepanjangan & wrap jadi vertikal. Sekarang
+       balik ke teks biasa, kapital semua, satu baris tanpa label dobel. */
     .st-key-header_status_bar div.stButton > button {
         background: transparent !important;
         border: none !important;
         border-radius: 8px !important;
         box-shadow: none !important;
         color: #1a0f00 !important;
-        font-family: 'Material Symbols Outlined' !important;
-        font-size: 21px !important;
-        padding: 0.3em 0.5em !important;
+        font-weight: 700 !important;
+        font-size: 11px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.2px !important;
+        white-space: nowrap !important;
+        padding: 0.3em 0.4em !important;
         min-width: 0 !important;
     }
-    /* avatar (trigger popover profil) -- icon "person" minimalis,
-       transparan, tanpa lingkaran/kotak solid seperti sebelumnya */
+    /* avatar (trigger popover profil) -- emoji orang polos, transparan,
+       tanpa lingkaran/kotak solid seperti sebelumnya */
     .st-key-profile_avatar_wrap div[data-testid="stPopover"] button {
         background: transparent !important;
         color: #1a0f00 !important;
-        font-family: 'Material Symbols Outlined' !important;
         font-weight: 400 !important;
-        font-size: 22px !important;
+        font-size: 20px !important;
         border-radius: 8px !important;
         width: auto !important;
         height: 34px !important;
@@ -807,15 +802,14 @@ st.markdown("""
         justify-content: center !important;
         margin-left: auto !important;
     }
-    /* baris 2: nav -- semua icon-only, transparan & nyatu sama strip
-       oranye (gaya sama kayak bar "Komunitas" di bawah), ramping/tipis,
-       bukan kotak hitam gendut kayak sebelumnya.
-       PERBAIKAN: border-top ditambahkan jadi garis pemisah tipis antara
-       baris 1 (brand/portofolio/notif/avatar) dan baris 2 (nav menu) --
-       padding-top dinaikkan dikit biar ada jarak napas di atas garis. */
+    /* baris 2: nav -- teks kapital polos (bukan icon lagi -- pendekatan
+       icon font dibuang karena font eksternalnya gagal load), transparan
+       & nyatu sama strip oranye, ramping/tipis, tanpa kotak hitam.
+       PERBAIKAN: border-top jadi garis pemisah tipis antara baris 1
+       (brand/portofolio/notif/avatar) dan baris 2 (nav menu). */
     .st-key-nav_icon_row {
         background: transparent;
-        padding: 6px 10px 4px 10px;
+        padding: 6px 10px 6px 10px;
         margin: 4px -12px -4px -12px;
         border-top: 1px solid rgba(26,15,0,0.18);
     }
@@ -823,58 +817,43 @@ st.markdown("""
     .st-key-nav_icon_row div[data-testid="stPopover"] button {
         background: transparent !important;
         color: #1a0f00 !important;
-        font-family: 'Material Symbols Outlined' !important;
-        font-weight: 400 !important;
-        font-size: 21px !important;
+        font-weight: 700 !important;
+        font-size: 11px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.2px !important;
+        white-space: nowrap !important;
         border-radius: 8px !important;
         border: none !important;
         box-shadow: none !important;
-        padding: 0.15em 0.2em 0 0.2em !important;
+        padding: 0.3em 0.2em !important;
         min-width: 0 !important;
-        height: 26px !important;
-        line-height: 1 !important;
+        height: auto !important;
+        line-height: 1.1 !important;
     }
     .st-key-nav_icon_row div.stButton > button:hover,
     .st-key-nav_icon_row div[data-testid="stPopover"] button:hover {
         opacity: 0.7 !important;
         transform: none !important;
     }
-    /* kolom pertama (Home) -- ikon, warna & tinggi seragam sama tombol lain */
+    /* kolom pertama (Home) -- teks, warna & gaya seragam sama tombol lain */
     .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
-        font-size: 21px !important;
         background: transparent !important;
-    }
-    /* label kecil di bawah tiap ikon nav (gaya bottom-nav-bar minimalis:
-       ikon di atas, teks singkat di bawahnya).
-       PERBAIKAN: sebelumnya font-weight 300 + opacity 0.72 kebaca tipis
-       banget -- sekarang ditebalkan (700) & opacity full biar jelas
-       kebaca tanpa mengubah ukuran/tinggi baris. */
-    .nav-icon-label {
-        display: block;
-        text-align: center;
-        font-size: 9.5px;
-        font-weight: 700;
-        letter-spacing: 0.2px;
-        color: #1a0f00;
-        opacity: 1;
-        line-height: 1;
-        margin-top: 1px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
     }
     /* isi popover kategori (sub-menu): tombol biasa, full width, rapi */
     div[data-testid="stPopoverBody"] div.stButton > button {
         font-size: 13.5px !important;
         padding: 0.6em 0.8em !important;
     }
-    /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan */
+    /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan.
+       PERBAIKAN: masih ketinggian -- tombolnya masih ikut padding gede
+       dari style tombol umum (div.stButton > button, 0.75em). Sekarang
+       padding container & tombol dikecilin biar bar-nya tipis. */
     .st-key-bottom_komunitas_bar {
         position: fixed;
         left: 0; right: 0; bottom: 0;
         z-index: 998;
         background: #ff8c00;
-        padding: 8px 16px calc(8px + env(safe-area-inset-bottom, 0px)) 16px;
+        padding: 4px 16px calc(4px + env(safe-area-inset-bottom, 0px)) 16px;
         box-shadow: 0 -10px 24px -10px rgba(0,0,0,0.55);
     }
     .st-key-bottom_komunitas_bar div.stButton > button {
@@ -883,6 +862,9 @@ st.markdown("""
         box-shadow: none !important;
         font-weight: 800 !important;
         letter-spacing: 0.3px;
+        font-size: 13px !important;
+        padding: 0.3em 0.6em !important;
+        min-height: 0 !important;
     }
     .st-key-bottom_komunitas_bar div.stButton > button:hover {
         transform: none !important;
@@ -1654,19 +1636,19 @@ if "active_panel" not in st.session_state:
 # dan ditaruh sebagai popover di baris ke-3 header, biar nggak makan
 # tempat vertikal di HP (keluhan awal: "ribet, makan tempat").
 NAV_CATEGORIES = [
-    ("search", "Scanner", [
+    ("Scanner", [
         ("scan", "🔍 Scan Market"),
         ("breakout", "🚀 Breakout Scanner"),
         ("fake", "⚠️ Fake Breakout"),
     ]),
-    ("trending_up", "Trading", [
+    ("Trading", [
         ("swing", "📉 Swing Alert"),
     ]),
-    ("visibility", "Bandar", [
+    ("Bandar", [
         ("bandar", "🐋 Bandar Detector"),
         ("broker", "🏦 Broker Summary"),
     ]),
-    ("notifications_active", "Alert", [
+    ("Alert", [
         ("telegram", "📲 Send Best to TG"),
     ]),
 ]
@@ -1693,7 +1675,7 @@ with st.container(key="header_status_bar"):
 
     with col_portfolio:
         if is_subscriber:
-            if st.button("account_balance_wallet", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
+            if st.button("PORTOFOLIO", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
                 st.session_state["show_portfolio"] = True
                 st.rerun()
 
@@ -1701,13 +1683,13 @@ with st.container(key="header_status_bar"):
         if is_subscriber and supabase_client:
             render_notification_bell(supabase_client, user_id=identifier)
 
-    # ---- Avatar (icon orang minimalis) = trigger dropdown (popover) berisi
+    # ---- Avatar (emoji orang polos) = trigger dropdown (popover) berisi
     # status langganan, Privasi Akun & Logout. Status (owner/aktif/belum)
     # sekarang cuma muncul DI DALAM popover, bukan di avatar-nya sendiri.
-    # PERBAIKAN: sebelumnya avatar pakai inisial nama dalam lingkaran hitam
-    # solid (kesannya "kotak/box" & beda gaya sama icon lain) -- sekarang
-    # diganti icon "person" minimalis, transparan, senada sama icon nav
-    # lainnya (Scanner/Trading/Bandar/Alert). ----
+    # PERBAIKAN: sempat dicoba icon font (Material Symbols) tapi gagal
+    # load di beberapa koneksi -- sekarang pakai emoji 👤 biasa, bawaan
+    # sistem, jadi dijamin tampil di HP manapun tanpa gantung font
+    # eksternal. ----
 
     # PERBAIKAN: st.popover bawaan Streamlit TIDAK otomatis nutup diri
     # sendiri kalau tombol DI DALAMNYA diklik lalu trigger st.rerun() --
@@ -1722,7 +1704,7 @@ with st.container(key="header_status_bar"):
 
     with col_avatar:
         with st.container(key="profile_avatar_wrap"):
-            with st.popover("person", use_container_width=True, key=_popover_key):
+            with st.popover("👤", use_container_width=True, key=_popover_key):
                 st.markdown(f"**{display_name}**")
                 if status == "owner":
                     st.success("👑 Owner access granted")
@@ -1777,26 +1759,26 @@ with st.container(key="header_status_bar"):
                         time.sleep(0.35)
                     st.rerun()
 
-    # ---- baris 2: nav -- Home tetap ikon, 4 kategori jadi TEKS label
-    # (tanpa ikon). Sekarang SELALU tampil semua (5 kolom), termasuk buat
+    # ---- baris 2: nav -- semua jadi TEKS kapital polos (icon dibuang --
+    # font eksternalnya gagal load). Tombol langsung nampilin nama,
+    # gak ada label terpisah lagi di bawahnya (satu teks per tombol,
+    # gak dobel). Sekarang SELALU tampil semua (5 kolom), termasuk buat
     # yang belum berlangganan -- penguncian akses kategori nanti menyusul,
     # bukan disembunyikan dari tampilan (permintaan terbaru). ----
     n_icons = 1 + len(NAV_CATEGORIES)
     with st.container(key="nav_icon_row"):
         icon_cols = st.columns(n_icons)
         with icon_cols[0]:
-            if st.button("home", key="home_btn", use_container_width=True, help="Home"):
+            if st.button("HOME", key="home_btn", use_container_width=True, help="Home"):
                 _go_to_dashboard()
-            st.markdown('<span class="nav-icon-label">Home</span>', unsafe_allow_html=True)
-        for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
+        for i, (cat_name, cat_items) in enumerate(NAV_CATEGORIES):
             with icon_cols[i + 1]:
-                with st.popover(cat_icon, use_container_width=True, help=cat_name):
+                with st.popover(cat_name.upper(), use_container_width=True, help=cat_name):
                     st.caption(cat_name)
                     for panel_key, panel_label in cat_items:
                         if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
                             st.session_state.active_panel = panel_key
                             st.rerun()
-                st.markdown(f'<span class="nav-icon-label">{cat_name}</span>', unsafe_allow_html=True)
 
 # ---- Banner soft: sisa masa aktif <=3 hari ----
 # Sengaja diletakkan di sini (segera setelah header, SEBELUM percabangan

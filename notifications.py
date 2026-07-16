@@ -89,7 +89,7 @@ def render_notification_bell(supabase, user_id: str, limit: int = 20):
     # merah kecil yang di-overlay di pojok kanan-atas ikon lewat CSS
     # -- konsisten dengan gaya badge notifikasi di app pada umumnya.
     with st.container(key="notif_bell_wrap"):
-        with st.popover("notifications", help="Notifikasi"):
+        with st.popover("🔔", help="Notifikasi"):
             st.markdown("**Notifikasi**")
 
             if unread:
@@ -134,15 +134,13 @@ def render_notification_bell(supabase, user_id: str, limit: int = 20):
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..600,0,0&display=swap');
         .st-key-notif_bell_wrap { position: relative; }
         .st-key-notif_bell_wrap button {
             background: transparent !important;
             border: none !important;
             box-shadow: none !important;
             color: #1a0f00 !important;
-            font-family: 'Material Symbols Outlined' !important;
-            font-size: 21px !important;
+            font-size: 20px !important;
             height: 42px !important;
             min-height: 42px !important;
             padding: 0 !important;
