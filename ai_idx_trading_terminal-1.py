@@ -1,0 +1,3971 @@
+import streamlit as st
+import json
+import os
+import html
+import hashlib
+import secrets as secrets_lib
+import requests
+import time
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+from datetime import time as dtime_cls
+from streamlit_cookies_manager import EncryptedCookieManager
+from supabase import create_client
+
+# Fitur Community Feed (post, reaction, laporan spam) + notifikasi bell.
+# File-file ini harus ada satu folder sama file utama ini:
+#   community_feed.py, notifications.py
+from community_feed import render_community_feed
+from notifications import render_notification_bell
+
+st.set_page_config(
+    page_title="SYARIAH SIGNAL",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# Dipindah ke sini (sebelumnya ada di dekat REFRESH_SECONDS lama, jauh di
+# bawah) karena sekarang blok nama app + caption "Update terakhir" di
+# header dirender lewat fragment sendiri (render_header_brand_block), dan
+# fragment itu butuh REFRESH_SECONDS sudah didefinisikan duluan sebelum
+# header dipanggil.
+REFRESH_SECONDS = 900
+
+# ============================================================
+#  CONFIG
+# ============================================================
+# Daftar username yang otomatis dapat akses "Owner" (bukan berdasarkan email
+# lagi, karena sistem login sekarang cuma username + password). Sesuaikan
+# daftar ini dengan username yang kamu pakai sendiri saat daftar di app.
+OWNER_USERNAMES = [
+    "dreamwarriorstudio",
+]
+
+# File tempat menyimpan status langganan agar TIDAK hilang setiap kali
+# Streamlit menjalankan ulang script (yang terjadi di HAMPIR setiap interaksi).
+# CATATAN: ini sekarang FALLBACK doang (dipakai kalau secrets Supabase belum
+# ke-set, misal pas develop lokal). Sumber data utama sekarang Supabase —
+# lihat load_user_db()/save_user_db() di bawah.
+USER_DB_FILE = "user_db.json"
+
+# ============================================================
+#  SUPABASE — penyimpanan data user (ganti dari user_db.json lokal).
+#  Isi SUPABASE_URL & SUPABASE_SERVICE_KEY di .streamlit/secrets.toml
+#  (lokal) atau Settings -> Secrets (Streamlit Cloud):
+#
+#     SUPABASE_URL = "https://xxxxxxxx.supabase.co"
+#     SUPABASE_SERVICE_KEY = "eyJhbGciOi..."   # service_role key, BUKAN anon key
+#
+#  PENTING: pakai service_role key (bukan anon/public key), karena app ini
+#  jalan di server Streamlit (bukan di browser user), dan perlu bypass RLS
+#  buat baca/tulis semua baris user. service_role key JANGAN PERNAH dipasang
+#  di kode frontend/browser — tapi di sini aman karena cuma dibaca server-side
+#  lewat st.secrets.
+# ============================================================
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", "")
+
+
+@st.cache_resource
+def get_supabase_client():
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return None
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    except Exception:
+        return None
+
+TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", "ISI_TOKEN_LO")
+TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "ISI_CHAT_ID_LO")
+
+# ============================================================
+#  GOAPI.IO — CATATAN: app ini TIDAK LAGI manggil GOAPI langsung.
+#  Broker Summary sekarang dibaca dari tabel `broker_summary` di
+#  Supabase, diisi 1x/hari oleh scan_worker.py (jalan di GitHub
+#  Actions). Kalau mau setup/ganti API key GOAPI, isi di GitHub
+#  Actions Secrets (GOAPI_API_KEY), BUKAN di Streamlit Secrets --
+#  app ini sudah tidak butuh key itu sama sekali.
+# ============================================================
+
+# Kunci rahasia buat enkripsi cookie sesi login. GANTI ini dengan string acak
+# panjang punya kamu sendiri (taruh di .streamlit/secrets.toml sebagai
+# COOKIE_PASSWORD), jangan pakai nilai default ini di produksi.
+COOKIE_PASSWORD = st.secrets.get("COOKIE_PASSWORD", "ganti-dengan-kunci-rahasia-acak-punya-kamu")
+
+# Berapa lama sesi "tetap login" bertahan sebelum wajib login ulang (dalam hari).
+SESSION_DURATION_DAYS = 30
+
+# ============================================================
+#  COOKIE MANAGER — supaya user tetap login walau tab/browser
+#  ditutup dan dibuka lagi (gak perlu login ulang tiap buka app),
+#  sampai dia benar-benar pencet tombol Logout atau cookie expired.
+# ============================================================
+cookies = EncryptedCookieManager(prefix="aiidx_", password=COOKIE_PASSWORD)
+if not cookies.ready():
+    # Komponen cookie butuh 1x render awal buat sinkron ke browser.
+    st.stop()
+
+
+def save_login_cookie(username):
+    """Simpan sesi login terenkripsi ke cookie browser."""
+    session_data = {
+        "username": username,
+        "issued_at": datetime.now().isoformat(),
+    }
+    cookies["auth_session"] = json.dumps(session_data)
+    cookies.save()
+
+
+def load_login_cookie(user_db):
+    """Baca & validasi cookie sesi login. Return username kalau valid, None kalau tidak."""
+    raw = cookies.get("auth_session")
+    if not raw:
+        return None
+    try:
+        session_data = json.loads(raw)
+        username = session_data.get("username", "")
+        issued_at = datetime.fromisoformat(session_data.get("issued_at", ""))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+    # Cek masa berlaku sesi.
+    if datetime.now() - issued_at > timedelta(days=SESSION_DURATION_DAYS):
+        return None
+
+    # Pastikan akunnya masih valid/terdaftar (owner atau ada di user_db).
+    if username in OWNER_USERNAMES or f"user:{username}" in user_db:
+        return username
+    return None
+
+
+def clear_login_cookie():
+    """Hapus sesi login dari cookie (dipakai saat logout)."""
+    if "auth_session" in cookies:
+        del cookies["auth_session"]
+        cookies.save()
+
+ISSI_FALLBACK_STOCKS = [
+    "AALI.JK", "ABBA.JK", "ABMM.JK", "ACES.JK", "ACST.JK", "ADCP.JK", "ADHI.JK", "ADMG.JK",
+    "ADMR.JK", "ADRO.JK", "AGII.JK", "AGRO.JK", "AIMS.JK", "AISA.JK", "AKKU.JK", "AKPI.JK",
+    "AKRA.JK", "ALDO.JK", "ALKA.JK", "ALMI.JK", "ALTO.JK", "AMAG.JK", "AMAR.JK", "AMFG.JK",
+    "AMIN.JK", "AMMN.JK", "AMOR.JK", "AMRT.JK", "ANDI.JK", "ANJT.JK", "ANTM.JK", "APEX.JK",
+    "APLI.JK", "APLN.JK", "ARCI.JK", "ARGO.JK", "ARII.JK", "ARKA.JK", "ARMY.JK", "ARNA.JK",
+    "ARTA.JK", "ARTO.JK", "ASGR.JK", "ASHA.JK", "ASII.JK", "ASJT.JK", "ASMI.JK", "ASRI.JK",
+    "ASRM.JK", "ASSA.JK", "ATAP.JK", "ATIC.JK", "ATLI.JK", "AUTO.JK", "AVIA.JK", "AWAN.JK",
+    "AXIO.JK", "AYAM.JK", "BAJA.JK", "BALI.JK", "BANK.JK", "BAPA.JK", "BAPK.JK", "BARI.JK",
+    "BATA.JK", "BAUT.JK", "BAYU.JK", "BBSS.JK", "BCIC.JK", "BCIP.JK", "BDMN.JK", "BEEF.JK",
+    "BEKS.JK", "BELI.JK", "BESS.JK", "BEST.JK", "BFIN.JK", "BGTG.JK", "BHIT.JK", "BIKA.JK",
+    "BIMA.JK", "BINA.JK", "BIRD.JK", "BISI.JK", "BKDP.JK", "BKSL.JK", "BKSW.JK", "BLTA.JK",
+    "BLTZ.JK", "BLUE.JK", "BMAS.JK", "BMSR.JK", "BMTR.JK", "BNBA.JK", "BNBR.JK", "BNGA.JK",
+    "BNII.JK", "BNLI.JK", "BOBA.JK", "BOGA.JK", "BOLA.JK", "BOLT.JK", "BOMC.JK", "BOSS.JK",
+    "BPFI.JK", "BPII.JK", "BPTR.JK", "BREN.JK", "BRIS.JK", "BRMS.JK", "BRNA.JK", "BRPT.JK",
+    "BSDE.JK", "BSIM.JK", "BSSR.JK", "BSWD.JK", "BTEK.JK", "BTEL.JK", "BTPS.JK", "BUKA.JK",
+    "BUKK.JK", "BULL.JK", "BUMI.JK", "BUVA.JK", "BVIC.JK", "BWPT.JK", "BYAN.JK", "CAKK.JK",
+    "CAMP.JK", "CARS.JK", "CASA.JK", "CASH.JK", "CASS.JK", "CBMF.JK", "CCSI.JK", "CEKA.JK",
+    "CENT.JK", "CESS.JK", "CFIN.JK", "CGCK.JK", "CHIP.JK", "CINT.JK", "CITA.JK", "CITY.JK",
+    "CLAY.JK", "CLEO.JK", "CLPI.JK", "CMNP.JK", "CMNT.JK", "CMPP.JK", "COAL.JK", "COCO.JK",
+    "CPIN.JK", "CPRO.JK", "CSAP.JK", "CSIS.JK", "CSRA.JK", "CTBN.JK", "CTRA.JK", "CTTH.JK",
+    "CUAN.JK", "CYBER.JK", "DADA.JK", "DART.JK", "DAYA.JK", "DEAL.JK", "DEFI.JK", "DEWA.JK",
+    "DFAM.JK", "DGIK.JK", "DHHL.JK", "DIAN.JK", "DILD.JK", "DIVA.JK", "DKFT.JK", "DLTA.JK",
+    "DMAS.JK", "DMMX.JK", "DMND.JK", "DNAR.JK", "DNET.JK", "DOID.JK", "DPTC.JK", "DPUM.JK",
+    "DRMA.JK", "DSFI.JK", "DSNG.JK", "DSSA.JK", "DUCK.JK", "DUTI.JK", "DVLA.JK", "DYAN.JK",
+    "EAST.JK", "ECII.JK", "EDII.JK", "EEST.JK", "EKAD.JK", "EKAW.JK", "ELPI.JK", "ELSA.JK",
+    "EMDE.JK", "EMTK.JK", "ENRG.JK", "ENVY.JK", "EPMT.JK", "ERAA.JK", "ERTX.JK", "ESIP.JK",
+    "ESSA.JK", "ESTA.JK", "ESTI.JK", "ETWA.JK", "EXCL.JK", "FAST.JK", "FASW.JK", "FILM.JK",
+    "FITT.JK", "FLMC.JK", "FMII.JK", "FOLK.JK", "FORU.JK", "FPNI.JK", "FRESH.JK", "FUTR.JK",
+    "GDST.JK", "GDYR.JK", "GEAR.JK", "GEMA.JK", "GEMS.JK", "GGRP.JK", "GHON.JK", "GJTL.JK",
+    "GLOB.JK", "GLVA.JK", "GMFI.JK", "GMTD.JK", "GOLD.JK", "GOLL.JK", "GOTO.JK", "GPRA.JK",
+    "GPSO.JK", "GRIA.JK", "GRPM.JK", "GSMF.JK", "GTBO.JK", "GWSA.JK", "GZCO.JK", "HAIS.JK",
+    "HALO.JK", "HATM.JK", "HDFA.JK", "HDIT.JK", "HEAL.JK", "HELI.JK", "HERO.JK", "HEXA.JK",
+    "HIKAM.JK", "HITS.JK", "HMSP.JK", "HOKI.JK", "HOME.JK", "HOTL.JK", "HRTA.JK", "HRUM.JK",
+    "IATA.JK", "IBFN.JK", "IBOS.JK", "IBST.JK", "ICBP.JK", "ICON.JK", "IDPR.JK", "IEXP.JK",
+    "IFII.JK", "IKAI.JK", "IKAN.JK", "IMAS.JK", "IMJS.JK", "IMPC.JK", "INAF.JK", "INCF.JK",
+    "INDF.JK", "INDO.JK", "INDX.JK", "INDY.JK", "INKP.JK", "INPP.JK", "INPS.JK", "INRU.JK",
+    "INTA.JK", "INTD.JK", "INTP.JK", "IPCC.JK", "IPCM.JK", "IPOL.JK", "IPTV.JK", "IRRA.JK",
+    "ISAT.JK", "ISSP.JK", "ITMA.JK", "ITMG.JK", "JAST.JK", "JAWA.JK", "JECC.JK", "JGLE.JK",
+    "JIHD.JK", "JKON.JK", "JKSW.JK", "JMAS.JK", "JPFA.JK", "JRPT.JK", "JSMR.JK", "JTPE.JK",
+    "KAEF.JK", "KAYU.JK", "KBAG.JK", "KBLI.JK", "KBLM.JK", "KBLV.JK", "KDSI.JK", "KEEN.JK",
+    "KEJU.JK", "KIJA.JK", "KKGI.JK", "KLAS.JK", "KLBF.JK", "KOCI.JK", "KOKI.JK", "KONI.JK",
+    "KOPI.JK", "KPAL.JK", "KPAS.JK", "KPIG.JK", "KRAH.JK", "KRAS.JK", "KREN.JK", "LINK.JK",
+    "LION.JK", "LMAS.JK", "LMPI.JK", "LPCK.JK", "LPKR.JK", "LPLI.JK", "LPPF.JK", "LPPS.JK",
+    "LRNU.JK", "LSIP.JK", "LTLS.JK", "LUCK.JK", "MAIN.JK", "MAMI.JK", "MAPA.JK", "MAPI.JK",
+    "MARI.JK", "MARK.JK", "MASA.JK", "MAXI.JK", "MBAP.JK", "MBMA.JK", "MBSS.JK", "MCOL.JK",
+    "MDIA.JK", "MDKA.JK", "MDKI.JK", "MDLN.JK", "MEDC.JK", "MEDI.JK", "MEDIA.JK", "MEJA.JK",
+    "META.JK", "MFIN.JK", "MFMI.JK", "MGLV.JK", "MICE.JK", "MIDI.JK", "MIKA.JK", "MINA.JK",
+    "MIRA.JK", "MITI.JK", "MKPI.JK", "MKTR.JK", "MLBI.JK", "MLIA.JK", "MLPT.JK", "MMIX.JK",
+    "MNCN.JK", "MPMX.JK", "MPPA.JK", "MPRO.JK", "MSIN.JK", "MSKY.JK", "MTDL.JK", "MTEL.JK",
+    "MTFN.JK", "MTLA.JK", "MTMH.JK", "MTPS.JK", "MTRA.JK", "MTSM.JK", "MURN.JK", "MYOR.JK",
+    "MYRX.JK", "MYTX.JK", "NANO.JK", "NASA.JK", "NAYZ.JK", "NELY.JK", "NEON.JK", "NFCX.JK",
+    "NIPS.JK", "NIRO.JK", "NKIL.JK", "NPGF.JK", "NRCA.JK", "NREC.JK", "NTBK.JK", "NUSA.JK",
+    "NVOM.JK", "NZIA.JK", "OASA.JK", "OBMD.JK", "ODEC.JK", "OILS.JK", "OKAS.JK", "OMED.JK",
+    "OPMS.JK", "PADI.JK", "PALM.JK", "PANR.JK", "PANS.JK", "PBRX.JK", "PBSA.JK", "PCAR.JK",
+    "PDES.JK", "PEGE.JK", "PEHA.JK", "PGAS.JK", "PGUN.JK", "PICO.JK", "PIKA.JK", "PJAA.JK",
+    "PKPK.JK", "PLIN.JK", "PLJA.JK", "PMJS.JK", "PMMP.JK", "PNBS.JK", "PNSE.JK", "POLA.JK",
+    "POLI.JK", "POLL.JK", "POLY.JK", "POOL.JK", "PORT.JK", "POWR.JK", "PPAT.JK", "PPRE.JK",
+    "PPRO.JK", "PRAS.JK", "PRDA.JK", "PRIM.JK", "PSAB.JK", "PSDN.JK", "PSGO.JK", "PSKT.JK",
+    "PSSI.JK", "PTBA.JK", "PTDU.JK", "PTIS.JK", "PTMP.JK", "PTPP.JK", "PTSN.JK", "PTSP.JK",
+    "PUDP.JK", "PURA.JK", "PURE.JK", "PUSH.JK", "PWON.JK", "PYFA.JK", "RAFI.JK", "RAJA.JK",
+    "RALS.JK", "RAMA.JK", "RANC.JK", "RBMS.JK", "RCCC.JK", "RELI.JK", "REMD.JK", "RICK.JK",
+    "RIGS.JK", "RIMO.JK", "RMBA.JK", "RMKO.JK", "RODA.JK", "SAGE.JK", "SAMF.JK", "SAMU.JK",
+    "SAPX.JK", "SATU.JK", "SBAT.JK", "SBMA.JK", "SCCO.JK", "SCMA.JK", "SCNP.JK", "SDMU.JK",
+    "SDPC.JK", "SEMA.JK", "SFAN.JK", "SGER.JK", "SGJL.JK", "SHID.JK", "SIAP.JK", "SIDO.JK",
+    "SILO.JK", "SIMA.JK", "SIMP.JK", "SINI.JK", "SIPD.JK", "SKBM.JK", "SKLT.JK", "SKYB.JK",
+    "SLIS.JK", "SMAA.JK", "SMAR.JK", "SMCB.JK", "SMDM.JK", "SMDR.JK", "SMGR.JK", "SMKL.JK",
+    "SMKM.JK", "SMRA.JK", "SMSM.JK", "SNLK.JK", "SOCI.JK", "SOFE.JK", "SOHO.JK", "SONA.JK",
+    "SOUL.JK", "SPMA.JK", "SPTO.JK", "SRSN.JK", "SRTG.JK", "SSIA.JK", "SSMS.JK", "SSTM.JK",
+    "STAA.JK", "STAR.JK", "STTP.JK", "SUGI.JK", "SULI.JK", "SUNI.JK", "SURE.JK", "TALF.JK",
+    "TAMU.JK", "TAPG.JK", "TARA.JK", "TAXI.JK", "TBIG.JK", "TBLA.JK", "TBMS.JK", "TCID.JK",
+    "TCPI.JK", "TEBE.JK", "TECH.JK", "TELE.JK", "TFAS.JK", "TFCO.JK", "TGKA.JK", "TIFA.JK",
+    "TINS.JK", "TIRA.JK", "TIRT.JK", "TKIM.JK", "TLKM.JK", "TMAS.JK", "TMPO.JK", "TNCA.JK",
+    "TOBA.JK", "TOOL.JK", "TOPD.JK", "TOTL.JK", "TOWR.JK", "TPIA.JK", "TPMA.JK", "TRIL.JK",
+    "TRIM.JK", "TRIN.JK", "TRIS.JK", "TRJA.JK", "TRJU.JK", "TRUE.JK", "TRUK.JK", "TRUS.JK",
+    "TSPC.JK", "TUGU.JK", "TYRE.JK", "UBER.JK", "UCIDA.JK", "UFOE.JK", "ULTJ.JK", "UNIC.JK",
+    "UNIQ.JK", "UNTR.JK", "UNVR.JK", "URBN.JK", "VATE.JK", "VICO.JK", "VINS.JK", "VIPT.JK",
+    "VKTR.JK", "VOKS.JK", "VRNA.JK", "WAPO.JK", "WEGE.JK", "WEHA.JK", "WIFI.JK", "WIIM.JK",
+    "WIKA.JK", "WINS.JK", "WIRG.JK", "WJSK.JK", "WMPP.JK", "WMUU.JK", "WOCK.JK", "WOOD.JK",
+    "WOWS.JK", "WSKT.JK", "WTIK.JK", "WTON.JK", "YPAS.JK", "YULE.JK", "ZAGO.JK", "ZATA.JK",
+    "ZBRA.JK",
+]
+
+
+def load_user_db():
+    client = get_supabase_client()
+    if client is None:
+        # Fallback: secrets Supabase belum ke-set (misal develop lokal tanpa
+        # secrets.toml). Tetap jalan pakai file JSON lama biar gak ngeblok kerja.
+        if os.path.exists(USER_DB_FILE):
+            try:
+                with open(USER_DB_FILE, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return {}
+        return {}
+
+    try:
+        resp = client.table("users").select("*").execute()
+    except Exception as e:
+        st.error(f"Gagal memuat data user dari Supabase: {e}")
+        return {}
+
+    db = {}
+    for row in resp.data:
+        uname = row.pop("username", None)
+        if not uname:
+            continue
+        db[f"user:{uname}"] = row
+    return db
+
+
+def save_user_db(db):
+    client = get_supabase_client()
+    if client is None:
+        # Fallback: sama seperti di load_user_db(), simpan ke JSON lokal.
+        with open(USER_DB_FILE, "w") as f:
+            json.dump(db, f)
+        return
+
+    rows = []
+    for key, data in db.items():
+        if not key.startswith("user:"):
+            continue
+        row = dict(data)
+        row["username"] = key[len("user:"):]
+        rows.append(row)
+
+    if not rows:
+        return
+
+    try:
+        client.table("users").upsert(rows, on_conflict="username").execute()
+    except Exception as e:
+        st.error(f"Gagal menyimpan data user ke Supabase: {e}")
+
+
+# ============================================================
+#  PASSWORD HASHING — untuk akun "daftar manual" (tanpa Gmail)
+# ============================================================
+# Password TIDAK PERNAH disimpan dalam bentuk teks biasa. Dipakai PBKDF2-HMAC
+# (100rb iterasi) + salt acak per-user, cukup standar untuk skala kecil.
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets_lib.token_hex(16)
+    pwd_hash = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), 100_000
+    ).hex()
+    return pwd_hash, salt
+
+
+def verify_password(password, stored_hash, salt):
+    if not stored_hash or not salt:
+        return False
+    test_hash, _ = hash_password(password, salt)
+    return secrets_lib.compare_digest(test_hash, stored_hash)
+
+
+# ============================================================
+#  RESET PASSWORD — token acak + kirim email via Brevo
+#  (Hanya untuk pelanggan aktif; verifikasi username + email cocok
+#  dengan data terdaftar sebelum token dibuat & email dikirim.)
+# ============================================================
+RESET_TOKEN_VALID_HOURS = 1
+
+
+def generate_reset_token(user_db, key):
+    """Bikin token reset acak (256-bit, aman dipakai di URL), simpan ke
+    user_db dengan batas waktu berlaku. Dipanggil HANYA setelah username,
+    email, dan status langganan aktif sudah diverifikasi di pemanggilnya."""
+    token = secrets_lib.token_urlsafe(32)
+    expiry = (datetime.now() + timedelta(hours=RESET_TOKEN_VALID_HOURS)).isoformat()
+    user_db[key]["reset_token"] = token
+    user_db[key]["reset_token_expiry"] = expiry
+    save_user_db(user_db)
+    return token
+
+
+def clear_reset_token(user_db, key):
+    """Hapus token reset setelah dipakai (atau kalau mau dibatalkan),
+    supaya link lama tidak bisa dipakai ulang."""
+    if key in user_db:
+        user_db[key].pop("reset_token", None)
+        user_db[key].pop("reset_token_expiry", None)
+        save_user_db(user_db)
+
+
+def is_reset_token_valid(record, token):
+    """Cek token yang datang dari URL cocok dengan yang tersimpan DAN
+    belum kedaluwarsa. Pakai compare_digest supaya tahan timing attack."""
+    if not record or not token:
+        return False
+    stored_token = record.get("reset_token")
+    expiry_str = record.get("reset_token_expiry")
+    if not stored_token or not expiry_str:
+        return False
+    if not secrets_lib.compare_digest(stored_token, token):
+        return False
+    try:
+        expiry = datetime.fromisoformat(expiry_str)
+    except ValueError:
+        return False
+    return datetime.now() <= expiry
+
+
+def send_reset_password_email(to_email, to_username, reset_link):
+    """Kirim email reset password lewat Brevo transactional email API.
+    Butuh secrets: BREVO_API_KEY, BREVO_SENDER_EMAIL (email pengirim yang
+    sudah diverifikasi di dashboard Brevo). BREVO_SENDER_NAME opsional.
+    Return (True, None) kalau sukses, (False, pesan_error) kalau gagal —
+    TIDAK PERNAH melempar exception ke pemanggil.
+    """
+    api_key = st.secrets.get("BREVO_API_KEY", "")
+    sender_email = st.secrets.get("BREVO_SENDER_EMAIL", "")
+    sender_name = st.secrets.get("BREVO_SENDER_NAME", "SYARIAH SIGNAL")
+
+    if not api_key or not sender_email:
+        return False, "BREVO_API_KEY / BREVO_SENDER_EMAIL belum diisi di Streamlit Secrets."
+
+    safe_username = html.escape(to_username)
+    payload = {
+        "sender": {"name": sender_name, "email": sender_email},
+        "to": [{"email": to_email, "name": to_username}],
+        "subject": "Reset Password — SYARIAH SIGNAL",
+        "htmlContent": (
+            '<div style="font-family:sans-serif;font-size:15px;color:#222;">'
+            f"<p>Halo <b>{safe_username}</b>,</p>"
+            "<p>Kami menerima permintaan reset password untuk akun kamu.</p>"
+            "<p>"
+            f'<a href="{html.escape(reset_link)}" '
+            'style="background:#ffb35a;color:#1a1a1a;padding:10px 18px;'
+            "border-radius:6px;text-decoration:none;font-weight:700;"
+            'display:inline-block;">Buat Password Baru</a>'
+            "</p>"
+            f"<p>Link ini berlaku selama {RESET_TOKEN_VALID_HOURS} jam. Kalau kamu "
+            "tidak meminta reset password ini, abaikan saja email ini — "
+            "akun kamu tetap aman.</p>"
+            "</div>"
+        ),
+    }
+    try:
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "accept": "application/json",
+                "api-key": api_key,
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            return True, None
+        return False, f"Brevo API error {resp.status_code}: {resp.text[:200]}"
+    except requests.RequestException as e:
+        return False, f"Gagal menghubungi layanan email: {e}"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_issi_stocks():
+    """Coba ambil daftar konstituen ISSI live dari IDX. Kalau IDX
+    block/rate-limit request ini (umum terjadi di shared cloud IP) atau
+    format response berubah, fallback ke daftar blue-chip statis."""
+    try:
+        resp = requests.get(
+            "https://www.idx.co.id/umbraco/Surface/StockData/GetConstituent",
+            params={"indexCode": "ISSI"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://www.idx.co.id/id/idx-syariah/indeks-syariah/",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        codes = [row["Code"].strip() for row in data if row.get("Code")]
+        tickers = sorted(set(f"{c}.JK" for c in codes if c))
+        if len(tickers) >= 50:
+            return tickers, True
+    except Exception:
+        pass
+    return ISSI_FALLBACK_STOCKS, False
+
+
+ISSI_STOCKS, _issi_live = get_issi_stocks()
+
+# ============================================================
+#  NEWS — dibaca dari Supabase (diisi scan_worker.py via Google News
+#  RSS + sentimen keyword, lihat scan_engine.py)
+# ============================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_stock_news(ticker, query, max_items=5):
+    """Berita untuk 1 saham -- dibaca dari tabel `stock_news` di Supabase
+    (diisi 1x/hari oleh scan_worker.py lewat Google News RSS, sentimen
+    juga sudah dihitung di server). Parameter `query` dipertahankan di
+    signature biar pemanggil lama tidak perlu diubah, tapi sudah tidak
+    dipakai untuk fetch (data sudah tersimpan per-ticker)."""
+    try:
+        res = (
+            supabase_client.table("stock_news")
+            .select("title, link, description, pub_date, source, sentiment, sentiment_emoji")
+            .eq("ticker", ticker)
+            .order("fetched_at", desc=True)
+            .limit(max_items)
+            .execute()
+        )
+        return res.data or []
+    except Exception:
+        return []
+
+
+def parse_pub_date(pub_date_str):
+    """Untuk mengurutkan berita dari yang terbaru. Kalau format tanggal
+    tidak dikenali, taruh di paling bawah daripada bikin app crash."""
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(pub_date_str)
+    except (TypeError, ValueError):
+        import datetime as _dt
+        return _dt.datetime.min.replace(tzinfo=_dt.timezone.utc)
+
+
+def get_all_stock_news(stock_queries, max_items_per_stock=5):
+    """Ambil berita untuk tiap saham di stock_queries (sentimen sudah
+    dihitung di server pas disimpan ke Supabase, jadi di sini tinggal
+    tag saham asalnya), lalu gabungkan semua dan urutkan dari yang
+    paling baru.
+
+    Dipanggil dengan daftar dinamis: gabungan saham portofolio user (yang
+    syariah) + top saham hasil scan. Lihat render_news_section() di bawah,
+    tab "📈 Saham".
+    """
+    all_news = []
+    for ticker, query in stock_queries.items():
+        articles = fetch_stock_news(ticker, query, max_items_per_stock)
+        for article in articles:
+            all_news.append({**article, "matched_stocks": [ticker]})
+    all_news.sort(key=lambda a: parse_pub_date(a["pub_date"]), reverse=True)
+    return all_news
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_general_market_news(max_items_per_query=5):
+    """Berita ekonomi/IHSG umum (tidak terikat saham tertentu) -- dibaca
+    dari tabel `stock_news` di Supabase dengan ticker='GENERAL' (diisi
+    scan_worker.py dari beberapa kata kunci ekonomi/kebijakan Indonesia,
+    dedupe by link sudah dilakukan di server)."""
+    try:
+        res = (
+            supabase_client.table("stock_news")
+            .select("title, link, description, pub_date, source, sentiment, sentiment_emoji")
+            .eq("ticker", "GENERAL")
+            .order("fetched_at", desc=True)
+            .limit(30)
+            .execute()
+        )
+        all_news = [{**a, "matched_stocks": []} for a in (res.data or [])]
+        all_news.sort(key=lambda a: parse_pub_date(a["pub_date"]), reverse=True)
+        return all_news
+    except Exception:
+        return []
+
+
+# ============================================================
+#  THEME / CSS  — dark "trading dojo" look
+# ============================================================
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Poppins', sans-serif; }
+
+    .stApp {
+        background:
+            radial-gradient(circle at 15% -10%, rgba(255,170,50,0.20) 0%, rgba(255,170,50,0) 45%),
+            radial-gradient(circle at 100% 0%, rgba(255,120,30,0.10) 0%, rgba(255,120,30,0) 40%),
+            #0b0c16;
+        color: #f3f2ef;
+    }
+    #MainMenu, footer, header {visibility: hidden;}
+
+    /* PERBAIKAN: Streamlit versi baru (1.36+) kasih padding-top ~96px
+       bawaan di block-container (dulu lebih kecil). Ini yang bikin ada
+       jarak kosong gede banget di atas sebelum header muncul. Kita
+       kecilkan supaya halaman pembuka nggak keliatan "ngambang". */
+    div[data-testid="stAppViewBlockContainer"],
+    .block-container {
+        padding-top: 4.6rem !important; /* dirapetin -- sebelumnya kejauhan dari header ke search bar */
+        padding-bottom: 3.6rem !important; /* ruang buat bottom bar Komunitas yang fixed (sekarang lebih tipis) */
+    }
+
+    /* PERBAIKAN: samakan ukuran SEMUA st.subheader() (h3) -- Screener,
+       Bandar, Breakout, Swing, Berita, dll -- persis kayak ukuran label
+       "Top 50 Gainers/Losers" (.gainer-loser-label, 22px/800) biar semua
+       judul halaman seragam satu ukuran, gak ada yang keliatan mini
+       sendiri dibanding yang lain. */
+    div[data-testid="stMarkdownContainer"] h3 {
+        font-size: 22px !important;
+        font-weight: 800 !important;
+        line-height: 1.3 !important;
+    }
+
+    /* PERBAIKAN (revisi): di halaman fitur (Screener/Bandar/Breakout/
+       Swing/dst) dan halaman Portofolio, judul adalah elemen PERTAMA yang
+       kelihatan -- ada ruang kosong nganggur di atasnya yang perlu
+       ditarik naik. Sebelumnya dipakai selector ":first-of-type" tapi
+       itu TIDAK PERNAH KENA, karena header (.st-key-header_status_bar)
+       dan bottom bar Komunitas (.st-key-bottom_komunitas_bar) sama-sama
+       position:fixed -- posisinya lepas dari alur halaman, TAPI secara
+       DOM tetap dihitung sebagai "elemen pertama/kedua", jadi subheader
+       fitur itu sebenarnya bukan first-of-type sungguhan. Sekarang
+       ditarget LANGSUNG lewat container key "panel_header_tight" yang
+       dibungkus manual persis di titik judul tiap halaman fitur & judul
+       Portofolio dirender (lihat pemakaian _tight_subheader() di bawah) --
+       jadi dijamin kena, gak tergantung tebak-tebakan urutan DOM lagi. */
+    .st-key-panel_header_tight {
+        margin-top: -46px !important;
+    }
+
+    /* ---------------------------------------------------------
+       TABEL HASIL SCAN — header KAPITAL, rata tengah, lebih besar
+    --------------------------------------------------------- */
+    .scan-table-wrap {
+        overflow-x: auto;
+        overflow-y: auto;
+        max-height: 460px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.08);
+        margin-bottom: 14px;
+    }
+    .scan-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        white-space: nowrap;
+    }
+    .scan-table thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        text-transform: uppercase;
+        text-align: center;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.6px;
+        color: #ffb35a;
+        background: #0f1020;
+        padding: 12px 14px;
+        border-bottom: 1px solid rgba(255,179,90,0.28);
+    }
+    .scan-table tbody td {
+        text-align: center;
+        padding: 9px 14px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+        color: #f3f2ef;
+    }
+    .scan-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+    .scan-table tbody tr:hover { background: rgba(255,179,90,0.06); }
+
+    /* PERBAIKAN: freeze kolom NO + STOCK (2 kolom pertama) supaya pas
+       tabel digeser kanan-kiri buat lihat kolom lain (PRICE, CHANGE PCT,
+       dst), NO+STOCK tetap nempel di kiri -- gak ikut kegeser. Dipakai
+       bareng di semua tabel yang lewat render_html_table (Screener,
+       Breakout, Fake Breakout, Swing Alert). Scroll atas-bawah tabel ini
+       sendiri sudah terpisah dari scroll halaman (lihat .scan-table-wrap
+       overflow-y:auto + max-height di atas), jadi geser tabel gak ikut
+       menggeser seluruh halaman.
+       Catatan: karena butuh background solid biar kolom yang lewat di
+       belakangnya kepotong rapi, baris ganjil/genap (nth-child even)
+       jadi nggak keliatan di 2 kolom ini -- cuma di kolom lainnya. */
+    .scan-table th:nth-child(1),
+    .scan-table td:nth-child(1) {
+        position: sticky;
+        left: 0;
+        width: 44px;
+        min-width: 44px;
+        max-width: 44px;
+    }
+    .scan-table th:nth-child(2),
+    .scan-table td:nth-child(2) {
+        position: sticky;
+        left: 44px;
+        width: 92px;
+        min-width: 92px;
+        max-width: 92px;
+    }
+    .scan-table thead th:nth-child(1),
+    .scan-table thead th:nth-child(2) {
+        z-index: 3; /* pojok kiri-atas -- di atas header biasa & kolom beku badan tabel */
+    }
+    .scan-table tbody td:nth-child(1),
+    .scan-table tbody td:nth-child(2) {
+        z-index: 1;
+        background: #14152a; /* solid, biar kolom lain yang lewat di belakang kepotong rapi */
+        border-right: 1px solid rgba(255,179,90,0.18); /* pembatas tipis: ini kolom beku, sisanya bisa digeser */
+    }
+    .stock-link,
+    [data-testid="stMarkdownContainer"] a.stock-link,
+    [data-testid="stMarkdownContainer"] a.stock-link:link,
+    [data-testid="stMarkdownContainer"] a.stock-link:visited {
+        color: #ff8a1f;
+        font-weight: 700;
+        text-decoration: none !important;
+        cursor: pointer;
+    }
+    [data-testid="stMarkdownContainer"] a.stock-link:hover {
+        color: #ffab5c;
+        text-decoration: none !important;
+    }
+
+    @keyframes floaty {
+        0%   { transform: translateY(0px); }
+        50%  { transform: translateY(-8px); }
+        100% { transform: translateY(0px); }
+    }
+    @keyframes glow-pulse {
+        0%   { opacity: 0.55; }
+        50%  { opacity: 0.9; }
+        100% { opacity: 0.55; }
+    }
+
+    /* ---------------------------------------------------------
+       TOP HEADER — logo teks kecil, rata kiri (bukan ikon gede
+       di tengah lagi -- kepanjangan/berat kalau di HP)
+    --------------------------------------------------------- */
+    .orange-topbar {
+        margin: 0 -1rem 2px -1rem;
+        padding: 2px 14px 0 14px;
+        background: transparent;
+        text-align: left;
+    }
+    .orange-topbar-title-mini {
+        font-size: 15px;
+        font-weight: 800;
+        color: #ff8c00;
+        letter-spacing: 0.3px;
+    }
+    .orange-topbar-sub {
+        font-size: 13px;
+        color: #a9a7c4;
+        margin-top: 2px;
+    }
+
+    .terminal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 18px 26px;
+        border-radius: 22px;
+        background: linear-gradient(135deg, rgba(255,170,60,0.14), rgba(255,170,60,0.03));
+        border: 1px solid rgba(255,170,60,0.20);
+        box-shadow: 0 18px 40px -18px rgba(255,150,30,0.35);
+        margin-bottom: 18px;
+    }
+    .terminal-title {
+        font-size: 26px;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+        color: #ffffff;
+    }
+    .terminal-sub {
+        font-size: 13px;
+        color: #a9a7c4;
+        margin-top: 2px;
+    }
+    .stock-fund-inline {
+        font-size: 15px;
+        font-weight: 500;
+        color: #d9d7ec;
+        margin-left: 10px;
+        vertical-align: middle;
+    }
+    .pulse-dot {
+        height: 9px; width: 9px; border-radius: 50%;
+        background: #ffb35a; display: inline-block; margin-right: 6px;
+        box-shadow: 0 0 10px #ffb35a;
+        animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.35; }
+        100% { opacity: 1; }
+    }
+
+    .update-strip {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 20px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.035);
+        border: 1px solid rgba(255,255,255,0.07);
+        margin-bottom: 16px;
+        font-size: 13px;
+        color: #a9a7c4;
+    }
+    .update-strip b { color: #f3f2ef; }
+
+    /* action buttons — pil oranye-kuning cerah, mengambang dengan glow */
+    div.stButton > button {
+        width: 100%;
+        border-radius: 50px;
+        border: none;
+        background: linear-gradient(135deg, #ffc25c, #ff8a1f);
+        color: #241300;
+        font-weight: 700;
+        padding: 0.75em 0.6em;
+        box-shadow: 0 14px 28px -10px rgba(255,140,20,0.55);
+        transition: 0.2s ease;
+    }
+    div.stButton > button:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 20px 34px -10px rgba(255,140,20,0.65);
+        color: #241300;
+    }
+    div.stButton > button:active { transform: translateY(-1px); }
+
+    /* Tombol "🗑️ Hapus" di halaman Portofolio -- disamain jadi solid
+       oranye flat (bukan gradasi kayak tombol aksi umum), senada gaya
+       tombol solid lain di app ini. */
+    .st-key-delete_portfolio_stock_btn button {
+        background: #ff8c00 !important;
+        box-shadow: none !important;
+    }
+    .st-key-delete_portfolio_stock_btn button:hover {
+        background: #e67e00 !important;
+        box-shadow: none !important;
+        transform: none !important;
+    }
+
+    .card {
+        background: rgba(255,255,255,0.045);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 22px;
+        padding: 18px 20px;
+        margin-bottom: 12px;
+        box-shadow: 0 16px 32px -20px rgba(0,0,0,0.6);
+    }
+    .badge {
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 700;
+        margin-right: 6px;
+    }
+    /* ---------------------------------------------------------
+       HEADER BARU — sticky, 2 baris kuning/oranye gradient, senada
+       sama gaya bar "Komunitas" di bawah. Baris 1: nama app + ikon
+       portofolio + notif + avatar bulat (inisial). Baris 2: nav
+       (home = ikon, 4 kategori = teks label, tanpa ikon).
+    --------------------------------------------------------- */
+    .st-key-header_status_bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        z-index: 999;
+        background: #ff8c00;
+        padding: 5px 12px 2px 12px;
+        margin: 0;
+        box-shadow: 0 6px 18px -12px rgba(0,0,0,0.55);
+    }
+    /* PERBAIKAN: Streamlit otomatis nge-stack st.columns jadi vertikal
+       di layar sempit (<640px). Header ini isinya ikon/tombol pendek
+       yang muat sejajar, jadi kita paksa tetap 1 baris horizontal. */
+    .st-key-header_status_bar div[data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 6px !important;
+    }
+    /* PERBAIKAN: sebelumnya CSS ini nargetin [data-testid="column"],
+       tapi Streamlit versi sekarang pakai "stColumn" -- jadi override-nya
+       nggak pernah kena, kolom tetap lebar sesuai teks di dalamnya
+       (itu penyebab baris kategori kepotong/scroll ke samping). Dua-duanya
+       ditarget sekarang biar aman di versi manapun. */
+    .st-key-header_status_bar div[data-testid="column"],
+    .st-key-header_status_bar div[data-testid="stColumn"] {
+        min-width: 0 !important;
+    }
+    /* nama aplikasi + caption "Update terakhir" -- ditumpuk vertikal
+       dalam SATU ruang yang sama (bukan nambah ruang baru). Dua-duanya
+       sekarang 1 blok HTML (2 <div> berurutan) dalam SATU st.markdown,
+       jadi bertumpuk normal sebagai block element, tanpa perlu hack
+       flex/gap di kolom Streamlit-nya. */
+    .app_brand_name {
+        font-weight: 800;
+        font-size: 19px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #d32f2f;
+        line-height: 19px;
+        margin-top: -2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    /* caption "🕒 Update harga terakhir: ..." -- sekarang 2 baris:
+       baris 1 (jam, TEBAL) + baris 2 (hari & tanggal, TIPIS/pudar).
+       line-height dikasih ruang cukup (bukan dipepetin ke 0) karena
+       glyph emoji jam butuh sedikit ruang vertikal ekstra, kalau
+       terlalu mepet malah numpuk sama baris nama app di atasnya. */
+    .app_update_caption {
+        margin-top: 0px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .app_update_line1 {
+        font-size: 11px;
+        font-weight: 700;
+        color: #1a0f00;
+        opacity: 0.95;
+        line-height: 14px;
+    }
+    .app_update_line2 {
+        font-size: 10px;
+        font-weight: 400;
+        color: #3a2200;
+        opacity: 0.75;
+        line-height: 13px;
+    }
+    .app_update_caption b { color: #1a0f00; }
+    /* tombol ikon (Portofolio) di baris 1 -- font emoji dibesarin dikit
+       biar sebanding sama ikon bell/avatar di sebelahnya, tetep transparan
+       tanpa kotak, senada sama .st-key-header_status_bar div.stButton */
+    .st-key-header_status_bar div[data-testid="column"]:nth-child(2) div.stButton > button,
+    .st-key-header_status_bar div[data-testid="stColumn"]:nth-child(2) div.stButton > button {
+        font-size: 18px !important;
+        padding: 0 0.4em !important;
+        height: 34px !important;
+    }
+    /* tombol teks (Portofolio) di baris 1 -- transparan, teks kapital
+       kecil-bold, tanpa kotak/border, senada sama baris nav di bawahnya
+       (HOME/SCANNER/TRADING/BANDAR/ALERT). PERBAIKAN: pendekatan icon
+       font (Material Symbols) dibuang -- fontnya gagal ke-load di
+       beberapa koneksi, hasilnya malah teks ligature mentah ("account_
+       balance_wallet") yang kepanjangan & wrap jadi vertikal. Sekarang
+       balik ke teks biasa, kapital semua, satu baris tanpa label dobel. */
+    /* PERBAIKAN: sebelumnya cuma diandalkan selector nth-child buat
+       transparansi tombol Portofolio (💼) & Home, tapi kotak gelap bawaan
+       Streamlit (background tombol "secondary") masih nongol di
+       beberapa versi -- selector nth-child kalah spesifik / gak konsisten
+       kena elemen yang tepat. Sekarang ditarget langsung lewat class
+       "st-key-<key>" yang otomatis ditempel Streamlit ke wrapper widget
+       yang punya parameter key=, jauh lebih pasti kena tombolnya. */
+    .st-key-portfolio_btn button,
+    .st-key-home_btn button {
+        background: transparent !important;
+        background-color: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+    /* PERBAIKAN: tulisan "HOME" kadang kebawa warna putih (default tombol
+       Streamlit) karena selector warna sebelumnya kalah dari elemen teks
+       di DALAM tombol (Streamlit bungkus label pakai <div>/<p> sendiri).
+       Sekarang semua elemen anak di dalam tombolnya juga dipaksa gelap. */
+    .st-key-portfolio_btn button,
+    .st-key-portfolio_btn button *,
+    .st-key-home_btn button,
+    .st-key-home_btn button * {
+        color: #1a0f00 !important;
+    }
+    .st-key-portfolio_btn button:hover,
+    .st-key-home_btn button:hover {
+        background: transparent !important;
+        background-color: transparent !important;
+        opacity: 0.7 !important;
+    }
+    .st-key-header_status_bar div.stButton > button {
+        background: transparent !important;
+        border: none !important;
+        border-radius: 8px !important;
+        box-shadow: none !important;
+        color: #1a0f00 !important;
+        font-weight: 700 !important;
+        font-size: 11px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.2px !important;
+        white-space: nowrap !important;
+        padding: 0.3em 0.4em !important;
+        min-width: 0 !important;
+    }
+    /* avatar (trigger popover profil) -- emoji orang polos, transparan,
+       tanpa lingkaran/kotak solid seperti sebelumnya */
+    .st-key-profile_avatar_wrap div[data-testid="stPopover"] button {
+        background: transparent !important;
+        color: #1a0f00 !important;
+        font-weight: 400 !important;
+        font-size: 20px !important;
+        border-radius: 8px !important;
+        width: auto !important;
+        height: 34px !important;
+        min-width: 0 !important;
+        padding: 0 0.4em !important;
+        border: none !important;
+        box-shadow: none !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        margin-left: auto !important;
+    }
+    /* baris 2: nav -- teks kapital polos (bukan icon lagi -- pendekatan
+       icon font dibuang karena font eksternalnya gagal load), transparan
+       & nyatu sama strip oranye, ramping/tipis, tanpa kotak hitam.
+       PERBAIKAN: border-top jadi garis pemisah tipis antara baris 1
+       (brand/portofolio/notif/avatar) dan baris 2 (nav menu). */
+    .st-key-nav_icon_row {
+        background: transparent;
+        padding: 6px 10px 6px 10px;
+        margin: 4px -12px -4px -12px;
+        border-top: 1px solid rgba(26,15,0,0.18);
+    }
+    /* PERBAIKAN: baris nav sebelumnya gak dipaksa lebar penuh, jadi
+       5 tombolnya (HOME/SCANNER/TRADING/BANDAR/ALERT) nempel ke kiri
+       sebagai satu grup & nyisain ruang kosong di kanan (Alert kelihatan
+       "geser kiri"). Sekarang barisnya dipaksa 100% lebar container,
+       dan tiap kolom dipaksa rata (flex: 1 1 0) biar 5 tombol itu
+       bener-bener bagi rata dari kiri sampe kanan. */
+    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] {
+        width: 100% !important;
+    }
+    .st-key-nav_icon_row div[data-testid="column"],
+    .st-key-nav_icon_row div[data-testid="stColumn"] {
+        flex: 1 1 0 !important;
+    }
+    /* PERBAIKAN: sebelumnya cuma ada gap 6px antar tombol, gak ada
+       pemisah visual -- kesannya nempel/mepet jadi satu strip. Sekarang
+       ditambah garis tipis vertikal di kanan tiap tombol (kecuali yang
+       paling kanan) biar tiap kategori kelihatan sebagai sel terpisah. */
+    .st-key-nav_icon_row div[data-testid="column"]:not(:last-child),
+    .st-key-nav_icon_row div[data-testid="stColumn"]:not(:last-child) {
+        border-right: 1px solid rgba(26,15,0,0.18);
+    }
+    .st-key-nav_icon_row div.stButton > button,
+    .st-key-nav_icon_row div[data-testid="stPopover"] button {
+        background: transparent !important;
+        color: #1a0f00 !important;
+        font-weight: 700 !important;
+        font-size: 11px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.2px !important;
+        white-space: nowrap !important;
+        border-radius: 8px !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0.3em 0.2em !important;
+        min-width: 0 !important;
+        height: auto !important;
+        line-height: 1.1 !important;
+    }
+    .st-key-nav_icon_row div.stButton > button:hover,
+    .st-key-nav_icon_row div[data-testid="stPopover"] button:hover {
+        opacity: 0.7 !important;
+        transform: none !important;
+    }
+    /* kolom pertama (Home) -- teks, warna & gaya seragam sama tombol lain */
+    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
+        background: transparent !important;
+    }
+    /* isi popover kategori (sub-menu): tombol biasa, full width, rapi.
+       PERBAIKAN: sebelumnya ikut gaya tombol umum (gradient oranye-kuning
+       + glow/shadow mengambang) -- kelihatan terlalu "nyala" & gak
+       konsisten buat menu sub-kategori. Sekarang solid flat oranye polos
+       (senada sama warna brand header), tanpa gradient & tanpa glow. */
+    div[data-testid="stPopoverBody"] div.stButton > button {
+        font-size: 13.5px !important;
+        padding: 0.6em 0.8em !important;
+        background: #ff8c00 !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stPopoverBody"] div.stButton > button:hover {
+        background: #e67e00 !important;
+        box-shadow: none !important;
+        transform: none !important;
+    }
+    /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan.
+       PERBAIKAN: masih ketinggian -- tombolnya masih ikut padding gede
+       dari style tombol umum (div.stButton > button, 0.75em). Sekarang
+       padding container & tombol dikecilin biar bar-nya tipis. */
+    .st-key-bottom_komunitas_bar {
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 998;
+        background: #ff8c00;
+        padding: 4px 16px calc(4px + env(safe-area-inset-bottom, 0px)) 16px;
+        box-shadow: 0 -10px 24px -10px rgba(0,0,0,0.55);
+    }
+    .st-key-bottom_komunitas_bar div.stButton > button {
+        background: transparent !important;
+        color: #1a0f00 !important;
+        box-shadow: none !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.3px;
+        font-size: 13px !important;
+        padding: 0.3em 0.6em !important;
+        min-height: 0 !important;
+    }
+    .st-key-bottom_komunitas_bar div.stButton > button:hover {
+        transform: none !important;
+        opacity: 0.85;
+    }
+
+    /* search bar cari saham -- pill minimalis, outline tipis, ikon nyatu
+       di dalam bar (request: "kaya kolom search modern, ikon di dalam
+       kolom", yang lama kesan jadul -- kotak putih solid + tombol
+       kaca pembesar nempel dipisah garis) */
+    /* jarak ke elemen di atasnya (nav icon row) kejauhan -- rapetin */
+    div[class*="search_form_wrap"] {
+        margin-top: -14px !important;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stForm"] {
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+    /* PERBAIKAN: bawaan Streamlit, kolom form otomatis TURUN JADI 2 BARIS
+       di layar sempit (HP). Dipaksa tetap row 1 baris di semua ukuran
+       layar (HP maupun desktop), input fleksibel & tombol kaca pembesar
+       lebar tetap kecil. Bar-nya sekarang pill penuh (border-radius 999px)
+       dengan outline tipis & isi transparan-gelap, bukan kotak putih
+       solid -- biar nyatu sama tema gelap, bukan nongol terang. */
+    div[class*="search_form_wrap"] div[data-testid="stHorizontalBlock"] {
+        gap: 0 !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.35);
+        border-radius: 999px;
+        overflow: hidden;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+        width: auto !important;
+        min-width: 0 !important;
+        flex: 1 1 auto !important;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:last-child {
+        flex: 0 0 46px !important;
+        width: 46px !important;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stTextInput"] input {
+        background: transparent !important;
+        color: #f3f2ef !important;
+        border: none !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        height: 42px !important;
+        padding-left: 18px !important;
+    }
+    div[class*="search_form_wrap"] div[data-testid="stTextInput"] input::placeholder {
+        color: rgba(243,242,239,0.5) !important;
+    }
+    /* PERBAIKAN: tombol kaca pembesar sebelumnya punya kotak putih +
+       border-left divider sendiri (kesan "2 elemen ditempel"). Sekarang
+       transparan penuh, nyatu jadi bagian dari pill yang sama -- cuma
+       ikonnya doang yang nongol di ujung kanan, tanpa kotak/garis. */
+    div[class*="search_form_wrap"] div[data-testid="stForm"] div.stButton > button,
+    div[class*="search_form_wrap"] button[kind="formSubmit"] {
+        background: transparent !important;
+        color: #f3f2ef !important;
+        border: none !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        height: 42px !important;
+        width: 46px !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+        font-size: 16px !important;
+    }
+
+    /* label "Top 50 Gainers/Losers" -- diperbesar buat gantiin judul besar
+       "Top Gainer/Loser" yang dihapus, jadi tetap ada penanda section jelas */
+    .gainer-loser-label {
+        font-size: 22px;
+        font-weight: 800;
+        color: #ffffff;
+        margin-bottom: 0;
+    }
+
+    /* Baris label + ikon info -- sejajar horizontal, ikon nempel di kanan
+       tulisan (bukan turun ke bawah kayak widget Streamlit biasa). */
+    .gainer-loser-label-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+
+    /* Ikon info + popup keterangan -- pure HTML/CSS pakai "checkbox hack"
+       (bukan <details>, karena <details> cuma bisa ditutup lewat tap
+       summary-nya lagi -- masalahnya summary/ikonnya ketutup modal pas
+       lagi kebuka, jadi gak keklik. Checkbox hack ini kasih backdrop
+       transparan yang nutupin SELURUH layar dan bisa di-tap di mana aja
+       buat nutup, karena backdrop-nya juga <label> yang nyambung ke
+       checkbox yang sama.) */
+    .disclaimer-checkbox {
+        display: none;
+    }
+    .disclaimer-icon {
+        cursor: pointer;
+        font-size: 20px;
+        line-height: 1;
+        user-select: none;
+        display: inline-flex;
+        align-items: center;
+    }
+    .disclaimer-backdrop {
+        display: none;
+    }
+    .disclaimer-checkbox:checked ~ .disclaimer-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.55);
+        z-index: 999;
+        cursor: pointer;
+    }
+    .disclaimer-popup {
+        display: none;
+    }
+    .disclaimer-checkbox:checked ~ .disclaimer-popup {
+        display: block;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 1000;
+        width: 85vw;
+        max-width: 320px;
+        max-height: 70vh;
+        overflow-y: auto;
+        background: #1b1b1f;
+        border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 12px;
+        padding: 16px 16px 14px 16px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #d5d5d5;
+        font-weight: 400;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+    }
+    .disclaimer-popup .disclaimer-hint {
+        display: block;
+        margin-top: 10px;
+        font-size: 11px;
+        color: #888;
+        font-style: italic;
+    }
+
+    /* Label "Top 50 Losers" -- di layar sempit/mobile kolom gainer & loser
+       ke-stack vertikal (gcol lalu lcol), jadi butuh jarak ekstra di atas
+       biar ga nempel meper sama list gainer di atasnya. */
+    .gainer-loser-label-losers {
+        margin-top: 20px;
+    }
+
+    .badge-buy { background: rgba(0,224,140,0.15); color: #00e08c; }
+    .badge-hold { background: rgba(255,152,0,0.15); color: #ff9800; }
+    .badge-neutral { background: rgba(255,193,7,0.15); color: #ffc107; }
+    .badge-wait { background: rgba(255,193,7,0.15); color: #ffc107; }
+    .badge-sell { background: rgba(255,82,82,0.15); color: #ff5252; }
+    .badge-nonsyariah { background: rgba(255,82,82,0.15); color: #ff5252; }
+    .gain-up { color: #00e08c; font-weight: 700; }
+    .gain-down { color: #ff5252; font-weight: 700; }
+    .portfolio-table-wrap { overflow-x: auto; }
+    .portfolio-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .portfolio-table th {
+        text-align: center;
+        padding: 10px 12px;
+        color: #ffb35a;
+        border-bottom: 1px solid rgba(255,179,90,0.28);
+        white-space: nowrap;
+    }
+    .portfolio-table td {
+        text-align: center;
+        padding: 9px 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+        color: #f3f2ef;
+    }
+    /* PERBAIKAN BUG: aturan ".portfolio-table td" di atas (specificity
+       1 class + 1 elemen) ternyata lebih spesifik daripada ".gain-up" /
+       ".gain-down" (cuma 1 class), jadi walau sel tabel Portofolio sudah
+       dikasih class gain-up/gain-down, warnanya ketiban putih (#f3f2ef)
+       terus -- %HARI INI dan %MINGGU INI jadi gak pernah kelihatan hijau/
+       merah. Ditambah override eksplisit di sini (target ".portfolio-table
+       td.gain-up" biar specificity-nya menang). */
+    .portfolio-table td.gain-up { color: #00e08c; }
+    .portfolio-table td.gain-down { color: #ff5252; }
+    /* Baris saham non-syariah: satu sel lebar penuh "TIDAK SYARIAH"
+       dengan background merah transparan pudar, gantiin kolom-kolom
+       harga/score/status/bandar yang isinya cuma "–" semua. */
+    .portfolio-table td.nonsyariah-cell {
+        background: rgba(255,82,82,0.12);
+        color: #ff8a8a;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+    }
+    .broker-chip {
+        display: inline-block;
+        padding: 2px 8px;
+        margin: 2px 3px 2px 0;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 700;
+    }
+    .broker-foreign { background: rgba(34,211,238,0.15); color: #22d3ee; }
+    .broker-domestic { background: rgba(167,139,250,0.15); color: #a78bfa; }
+    .broker-other { background: rgba(156,163,175,0.15); color: #9ca3af; }
+
+    .hist-table-wrap {
+        max-height: 320px;
+        overflow-y: auto;
+        overflow-x: auto;
+        border: 1px solid rgba(255,179,90,0.15);
+        border-radius: 8px;
+    }
+    .hist-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .hist-table th {
+        position: sticky; top: 0;
+        background: #14152a;
+        text-align: center;
+        padding: 8px 10px;
+        color: #ffb35a;
+        border-bottom: 1px solid rgba(255,179,90,0.28);
+        white-space: nowrap;
+        z-index: 1;
+    }
+    .hist-table td {
+        text-align: center;
+        padding: 7px 10px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+        color: #f3f2ef;
+        white-space: nowrap;
+    }
+    .stDataFrame { border-radius: 16px; overflow: hidden; }
+
+    /* daftar Top Gainer/Loser: bisa nampung sampai 50 saham, tapi tampilan
+       dibatasi ~5 baris kelihatan, sisanya di-scroll biar UI tidak panjang */
+    .scroll-list {
+        max-height: 232px;
+        overflow-y: auto;
+        padding-right: 6px;
+    }
+    .scroll-list::-webkit-scrollbar { width: 6px; }
+    .scroll-list::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.15);
+        border-radius: 10px;
+    }
+    .scroll-item {
+        background: rgba(255,255,255,0.045);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px;
+        padding: 9px 14px;
+        margin-bottom: 6px;
+        font-size: 13px;
+    }
+    .scroll-item:last-child { margin-bottom: 0; }
+    .gl-tag {
+        display: inline-block;
+        margin-left: 4px;
+        padding: 1px 7px;
+        border-radius: 8px;
+        font-size: 11px;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    .gl-good { background: rgba(0,224,140,0.15); color: #00e08c; }
+    .gl-bad { background: rgba(255,82,82,0.15); color: #ff5252; }
+    .gl-warn { background: rgba(255,152,0,0.15); color: #ff9800; }
+    .gl-caution { background: rgba(255,193,7,0.15); color: #ffc107; }
+    .gl-rebound { background: rgba(34,211,238,0.15); color: #22d3ee; }
+    .gl-neutral { background: rgba(156,163,175,0.15); color: #9ca3af; }
+
+    /* ---------------------------------------------------------
+       LOGIN / DAFTAR PANEL — card oranye dreamy, mengambang
+    --------------------------------------------------------- */
+    /* PERBAIKAN: .auth-wrap & .auth-panel dulu div manual yang nggak
+       benar-benar membungkus widget Streamlit di dalamnya (lihat komentar
+       di render_auth_panel()). Sekarang keduanya adalah st.container(key=...)
+       asli, yang otomatis dapat class ".st-key-<key>" pada wrapper div-nya,
+       dan wrapper itu BENERAN jadi parent dari semua widget di dalam blok
+       `with`-nya. Kita reset padding/gap bawaan container Streamlit dulu
+       biar nggak dobel sama padding custom kita. */
+    .st-key-auth_wrap {
+        max-width: 460px;
+        margin: 0 auto;
+        position: relative;
+        z-index: 5;
+        padding: 0 12px;
+    }
+    .auth-logo-badge {
+        width: 68px; height: 68px;
+        margin: 0 auto 18px auto;
+        border-radius: 24px;
+        background: linear-gradient(145deg, #ffc25c, #ff8a1f);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 32px;
+        box-shadow: 0 18px 36px -8px rgba(255,140,20,0.55);
+        animation: floaty 4.5s ease-in-out infinite;
+    }
+    .st-key-auth_panel {
+        max-width: 340px;
+        margin: 0 auto;
+        padding: 20px 26px 20px 26px;
+        border-radius: 32px;
+        background: linear-gradient(160deg, #ffd28a 0%, #ff9a3d 55%, #ff7a1a 100%);
+        border: 1px solid rgba(255,255,255,0.25);
+        box-shadow:
+            0 40px 70px -20px rgba(255,130,20,0.45),
+            0 25px 50px -15px rgba(0,0,0,0.5);
+    }
+    /* elemen internal st.container Streamlit punya gap default antar-block;
+       kita kecilkan supaya rapat kayak card HTML aslinya */
+    .st-key-auth_panel div[data-testid="stVerticalBlock"] {
+        gap: 0.4rem;
+    }
+    .auth-title {
+        text-align: center;
+        font-size: 21px;
+        font-weight: 800;
+        color: #3a1c00;
+        margin-bottom: 2px;
+    }
+    .auth-caption {
+        text-align: center;
+        font-size: 12.5px;
+        color: #6b3a10;
+        margin-bottom: 10px;
+    }
+
+    /* PERBAIKAN: di Streamlit versi baru, <input> dibungkus 2 lapis div
+       react-aria (.react-aria-TextField > [data-testid="stTextInputRootElement"]),
+       dan wrapper PALING LUAR itu ("stTextInputRootElement") punya
+       background/border ABU-ABU BAWAAN sendiri (#f0f2f6, radius 8px).
+       Kalau cuma elemen <input> yang di-warnain, wrapper abu-abu itu
+       tetap keliatan sebagai "pinggiran" di sekitar kotak — makanya
+       kotak input keliatan cuma separuh ke-style. Sekarang kita warnai
+       WRAPPER-nya juga (bukan cuma <input>-nya), dan bikin <input>
+       transparan supaya menyatu sempurna jadi satu kotak utuh. */
+    .st-key-auth_panel .stTextInput [data-testid="stTextInputRootElement"] {
+        border-radius: 14px;
+        background-color: rgba(255,255,255,0.85);
+        border: 1px solid rgba(255,255,255,0.6);
+        transition: 0.15s ease;
+    }
+    .st-key-auth_panel .stTextInput [data-testid="stTextInputRootElement"]:focus-within {
+        border-color: #3a1c00;
+        box-shadow: 0 0 0 3px rgba(58,28,0,0.18);
+    }
+    .st-key-auth_panel .stTextInput input {
+        background-color: transparent;
+        color: #3a1c00;
+        padding: 0.6em 0.85em;
+    }
+    .st-key-auth_panel .stTextInput input::placeholder { color: #b07a45; }
+    .st-key-auth_panel label { color: #4a2400 !important; font-weight: 600 !important; font-size: 13px !important; }
+
+    /* di HP/tablet portrait: kolom form full lebar, stack ke bawah (bawaan Streamlit) */
+    /* di desktop/tablet landscape (>640px): field disejajarkan kiri-kanan */
+    @media (max-width: 640px) {
+        .st-key-auth_panel div[data-testid="stHorizontalBlock"] {
+            flex-direction: column !important;
+            gap: 0 !important;
+        }
+        .st-key-auth_panel div[data-testid="stHorizontalBlock"] > div {
+            width: 100% !important;
+        }
+        .st-key-auth_panel { max-width: 100%; }
+    }
+    @media (min-width: 641px) {
+        .st-key-auth_wrap { max-width: 560px; }
+        .st-key-auth_panel { max-width: 460px; }
+    }
+
+    /* tab styling — pil lembut di atas card oranye.
+       PERBAIKAN: Streamlit 1.59.1 sudah tidak lagi memakai BaseWeb untuk
+       komponen Tabs (jadi atribut [data-baseweb="tab-list"] / "tab" yang
+       dipakai kode lama sudah TIDAK ADA lagi di DOM versi ini — itu
+       kenapa tab-nya render polos/default, bukan pil oranye). Komponen
+       Tabs sekarang dibangun pakai react-aria, dengan struktur:
+         .stTabs > div[role="tablist"] > div[data-testid="stTab"] (role="tab")
+       dan tab yang aktif ditandai atribut aria-selected="true" (ini masih
+       sama seperti sebelumnya). React-aria juga menyisipkan elemen
+       <div class="react-aria-SelectionIndicator"> sebagai garis bawah
+       aktif bawaan — kita sembunyikan itu karena style pil kita pakai
+       background solid, bukan garis bawah. */
+    .st-key-auth_panel .stTabs [role="tablist"] {
+        display: flex;
+        gap: 6px;
+        background: rgba(255,255,255,0.35);
+        padding: 6px;
+        border-radius: 50px;
+    }
+    .st-key-auth_panel .stTabs [data-testid="stTab"] {
+        flex: 1;
+        justify-content: center;
+        border-radius: 50px;
+        color: #6b3a10;
+        font-weight: 600;
+        transition: 0.15s ease;
+    }
+    .st-key-auth_panel .stTabs [data-testid="stTab"] .react-aria-SelectionIndicator {
+        display: none;
+    }
+    .st-key-auth_panel .stTabs [data-testid="stTab"][aria-selected="true"] {
+        background: #2c1500;
+        color: #ffd28a !important;
+        box-shadow: 0 8px 18px -6px rgba(0,0,0,0.35);
+    }
+    .st-key-auth_panel .stTabs [data-testid="stTab"][aria-selected="true"] p {
+        color: #ffd28a !important;
+    }
+
+    .st-key-auth_panel div.stFormSubmitButton > button {
+        border-radius: 50px;
+        border: none;
+        background: #2c1500;
+        color: #ffd28a;
+        font-weight: 800;
+        padding: 0.75em 0.6em;
+        box-shadow: 0 16px 30px -10px rgba(0,0,0,0.45);
+    }
+    .st-key-auth_panel div.stFormSubmitButton > button:hover {
+        box-shadow: 0 22px 38px -10px rgba(0,0,0,0.55);
+        transform: translateY(-3px);
+        color: #ffd28a;
+    }
+
+    /* Tombol "Lupa Password?" dan "Kembali ke Masuk" ditampilkan sebagai
+       link teks kecil, bukan tombol besar. */
+    .st-key-btn_forgot button,
+    .st-key-btn_back_login button {
+        display: block;
+        margin: 10px auto 0 auto;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        color: #6b3a10 !important;
+        text-decoration: underline;
+        font-weight: 600;
+        font-size: 13.5px;
+        padding: 4px 0 !important;
+    }
+    .st-key-btn_forgot button:hover,
+    .st-key-btn_back_login button:hover {
+        color: #40230a !important;
+        transform: none !important;
+    }
+    .st-key-btn_back_login button {
+        margin: 0 0 12px 0;
+        text-align: left;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+#  AUTH / SUBSCRIPTION GATE
+# ============================================================
+# Login pakai akun sendiri: username + password. Password di-hash (PBKDF2 +
+# salt), tidak pernah disimpan dalam bentuk teks biasa.
+#
+# PERBAIKAN vs versi lama: sebelumnya SIAPA PUN bisa ketik email apa saja
+# (termasuk email owner) dan langsung dianggap sah, tanpa verifikasi sama
+# sekali. Sekarang akun diverifikasi dengan password hash yang tersimpan,
+# dan username baru harus daftar dulu sebelum bisa masuk.
+def get_user_status(identifier, user_db):
+    username = identifier.replace("user:", "", 1)
+    if username in OWNER_USERNAMES:
+        return "owner"
+    return user_db.get(identifier, {}).get("status", "inactive")
+
+
+# ============================================================
+#  LANGGANAN — durasi paket, aktivasi/perpanjangan, & info tampilan
+# ============================================================
+# Durasi per paket (hari). Sesuaikan di sini kalau nanti ada paket baru
+# atau durasinya berubah -- semua tempat lain (webhook Stripe, panel
+# aktivasi manual Owner, popover status) otomatis ikut.
+PLAN_DURATIONS = {
+    "bulanan": 30,
+    "3_bulanan": 90,
+    "tahunan": 365,
+}
+PLAN_LABELS = {
+    "bulanan": "Bulanan",
+    "3_bulanan": "3 Bulanan",
+    "tahunan": "Tahunan",
+}
+
+_BULAN_ID = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+_HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+
+
+def format_tanggal_id(dt):
+    """Format datetime jadi '12 Jul 2026' (tanpa perlu setting locale OS)."""
+    return f"{dt.day} {_BULAN_ID[dt.month - 1]} {dt.year}"
+
+
+def format_hari_tanggal_id(dt):
+    """Format datetime jadi 'Kamis, 16 Jul 2026' (nama hari + tanggal,
+    tanpa perlu setting locale OS -- dt.weekday() Senin=0..Minggu=6)."""
+    return f"{_HARI_ID[dt.weekday()]}, {format_tanggal_id(dt)}"
+
+
+def format_harga(value):
+    """Format harga saham jadi angka bulat pakai titik sebagai pemisah
+    ribuan gaya Indonesia (contoh: 1250.0 -> '1.250'). Kalau value kosong
+    /None/NaN, balikin '–' biar aman dipasang di HTML tabel/list."""
+    try:
+        if value is None:
+            return "–"
+        f = float(value)
+        if f != f:  # NaN check tanpa import math
+            return "–"
+        return f"{f:,.0f}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "–"
+
+
+def activate_subscription(user_db, identifier, plan):
+    """Aktifkan/perpanjang langganan user (dipanggil dari webhook Stripe
+    ATAU dari panel aktivasi manual Owner). Sesuai keputusan: setiap kali
+    ini dipanggil (= setiap kali user bayar), status jadi aktif, tanggal
+    MULAI = saat ini juga (waktu pembayaran/aktivasi terjadi), dan tanggal
+    BERAKHIR = mulai + durasi paket yang dipilih. Tidak ada logika 'sisa
+    hari lama ditambahkan' -- simpel sesuai permintaan awal, gampang
+    diubah nanti kalau perlu."""
+    if plan not in PLAN_DURATIONS:
+        plan = "bulanan"
+    now = datetime.now()
+    record = user_db.setdefault(identifier, {})
+    record["status"] = "active"
+    record["plan"] = plan
+    record["subscribed_at"] = now.isoformat()
+    record["expires_at"] = (now + timedelta(days=PLAN_DURATIONS[plan])).isoformat()
+    save_user_db(user_db)
+    return record
+
+
+def get_subscription_info(identifier, user_db):
+    """Return dict {plan, subscribed_at, expires_at, days_left} kalau user
+    ini punya data langganan (pernah diaktifkan), None kalau belum pernah
+    (misal owner, atau akun baru daftar yang belum pernah bayar)."""
+    record = user_db.get(identifier, {})
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return None
+    try:
+        expires_dt = datetime.fromisoformat(expires_at)
+    except (ValueError, TypeError):
+        return None
+    days_left = (expires_dt.date() - datetime.now().date()).days
+    return {
+        "plan": record.get("plan"),
+        "subscribed_at": record.get("subscribed_at"),
+        "expires_at": expires_at,
+        "days_left": days_left,
+    }
+
+
+# ============================================================
+#  PORTOFOLIO USER — daftar saham personal, tersimpan permanen di user_db
+# ============================================================
+def get_user_portfolio(user_db, identifier):
+    """Daftar kode saham (tanpa '.JK') yang sudah ditambahkan user, urut
+    sesuai waktu ditambahkan."""
+    return user_db.get(identifier, {}).get("portfolio", [])
+
+
+def add_to_portfolio(user_db, identifier, code):
+    """Tambah 1 kode saham ke portofolio user. Return (True, None) kalau
+    berhasil, (False, pesan_error) kalau gagal (kode kosong, sudah ada,
+    atau tickernya tidak valid/tidak ada datanya di bursa)."""
+    code = code.strip().upper().replace(".JK", "")
+    if not code:
+        return False, "Kode saham tidak boleh kosong."
+    if identifier not in user_db:
+        return False, "Akun tidak ditemukan."
+
+    portfolio = user_db[identifier].setdefault("portfolio", [])
+    if code in portfolio:
+        return False, f"{code} sudah ada di portofolio kamu."
+
+    # Validasi: kodenya beneran ada datanya di bursa (baik ISSI maupun
+    # bukan) sebelum diterima, supaya tidak nyimpen kode saham ngaco.
+    # Dicek dari data yang SUDAH ADA di Supabase (diisi scan_worker.py,
+    # yang scan SEMUA saham IDX) -- bukan panggilan live ke yfinance.
+    # Konsekuensi: saham yang baru IPO dan belum sempat ke-scan (maks
+    # ~15 menit sekali) untuk sementara tidak akan lolos validasi ini.
+    ticker_jk = f"{code}.JK"
+    is_syariah = ticker_jk in ISSI_STOCKS
+    if not is_syariah:
+        quote = get_quick_quote_cached(ticker_jk)
+        if quote is None:
+            return False, f"Kode saham '{code}' tidak ditemukan / belum ada datanya."
+
+    portfolio.append(code)
+    save_user_db(user_db)
+    return True, None
+
+
+def remove_from_portfolio(user_db, identifier, code):
+    if identifier in user_db and "portfolio" in user_db[identifier]:
+        user_db[identifier]["portfolio"] = [
+            c for c in user_db[identifier]["portfolio"] if c != code
+        ]
+        save_user_db(user_db)
+
+
+def render_auth_panel(user_db):
+    # PERBAIKAN: dulu pakai <div class="auth-wrap">...</div> manual via
+    # beberapa panggilan st.markdown() terpisah. Itu TIDAK benar-benar
+    # membungkus tabs/form/input di bawahnya, karena tiap pemanggilan
+    # st.markdown/st.tabs/st.form di Streamlit jadi elemen DOM sendiri-
+    # sendiri (sibling), bukan nested sesuai urutan tag HTML yang ditulis.
+    # Sekarang pakai st.container(key=...) asli, yang beneran membungkus
+    # semua widget di dalam blok `with`-nya sebagai satu parent di DOM,
+    # dan otomatis dapat CSS class ".st-key-<key>" yang stabil buat di-style.
+    #
+    # "Lupa Password" BUKAN tab ketiga lagi — itu tampilan terpisah yang
+    # dikontrol lewat st.session_state["auth_view"] ("login" / "forgot").
+    # Link HTML + JS onclick tidak bisa mengubah state Python di Streamlit,
+    # jadi trigger-nya pakai st.button asli (di-styling supaya terlihat
+    # seperti link teks kecil, lihat CSS ".st-key-btn_forgot/back_login").
+    st.session_state.setdefault("auth_view", "login")
+
+    with st.container(key="auth_wrap"):
+        with st.container(key="auth_panel"):
+            if st.session_state["auth_view"] == "forgot":
+                st.markdown('<div class="auth-title">Lupa Password</div>', unsafe_allow_html=True)
+
+                if st.button("← Kembali ke Masuk", key="btn_back_login", use_container_width=True):
+                    st.session_state["auth_view"] = "login"
+                    st.rerun()
+
+                st.markdown(
+                    '<div class="auth-caption">Masukkan username dan email yang '
+                    'terdaftar. Kalau akun kamu pelanggan aktif, link reset '
+                    'password akan dikirim ke email kamu.</div>',
+                    unsafe_allow_html=True,
+                )
+                with st.form("form_lupa_password", clear_on_submit=False):
+                    lupa_username = st.text_input("Username", key="lupa_username_input")
+                    lupa_email = st.text_input("Email terdaftar", key="lupa_email_input")
+                    submit_lupa = st.form_submit_button("Kirim Link Reset", use_container_width=True)
+
+                if submit_lupa:
+                    uname = lupa_username.strip().lower()
+                    email_input = lupa_email.strip().lower()
+                    key = f"user:{uname}"
+                    record = user_db.get(key)
+                    status_ok = get_user_status(key, user_db) in ("owner", "active")
+                    email_ok = bool(
+                        record and email_input
+                        and record.get("email", "").strip().lower() == email_input
+                    )
+
+                    if not uname or not email_input:
+                        st.error("Username dan email wajib diisi.")
+                    else:
+                        app_url = st.secrets.get("APP_URL", "")
+                        if record and email_ok and status_ok and app_url:
+                            token = generate_reset_token(user_db, key)
+                            reset_link = f"{app_url}/?reset_token={token}&u={uname}"
+                            sent, err = send_reset_password_email(record["email"], uname, reset_link)
+                            if not sent and uname in OWNER_USERNAMES:
+                                # Detail error cuma tampil ke akun Owner sendiri,
+                                # buat gampang debug konfigurasi Brevo/APP_URL —
+                                # tidak bocor ke user lain lewat pesan generik di bawah.
+                                st.error(f"[Owner debug] Email gagal terkirim: {err}")
+                        # Pesan SELALU sama persis apa pun hasilnya (username salah,
+                        # email tidak cocok, belum berlangganan aktif, dll) — supaya
+                        # orang tidak bisa menebak-nebak username/email pelanggan
+                        # aktif dari respons form ini (mencegah user enumeration).
+                        st.success(
+                            "Jika akun terdaftar, email cocok, dan berlangganan aktif, "
+                            "link reset password sudah dikirim. Cek juga folder "
+                            "Spam/Promosi kalau belum masuk."
+                        )
+                return
+
+            st.markdown('<div class="auth-title">Masuk untuk Melanjutkan</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="auth-caption">Belum punya akun? Daftar dulu</div>',
+                unsafe_allow_html=True,
+            )
+
+            tab_masuk, tab_daftar = st.tabs(["Masuk", "Daftar Baru"])
+
+            with tab_masuk:
+                with st.form("form_masuk_username", clear_on_submit=False):
+                    col_u, col_p = st.columns(2)
+                    with col_u:
+                        login_username = st.text_input("Username", key="login_username_input")
+                    with col_p:
+                        login_password = st.text_input("Password", type="password", key="login_password_input")
+                    submit_masuk = st.form_submit_button("Masuk", use_container_width=True)
+
+                if st.button("Lupa Password?", key="btn_forgot", use_container_width=True):
+                    st.session_state["auth_view"] = "forgot"
+                    st.rerun()
+
+                if submit_masuk:
+                    uname = login_username.strip().lower()
+                    record = user_db.get(f"user:{uname}")
+                    if not uname or not login_password:
+                        st.error("Username dan password wajib diisi.")
+                    elif uname not in OWNER_USERNAMES and (
+                        not record
+                        or not verify_password(
+                            login_password, record.get("password_hash", ""), record.get("salt", "")
+                        )
+                    ):
+                        st.error("Username atau password salah.")
+                    elif uname in OWNER_USERNAMES and not record:
+                        # Owner belum pernah daftar password — arahkan ke tab Daftar dulu.
+                        st.error("Akun owner ini belum terdaftar. Silakan daftar dulu di tab 'Daftar Baru'.")
+                    elif uname in OWNER_USERNAMES and not verify_password(
+                        login_password, record.get("password_hash", ""), record.get("salt", "")
+                    ):
+                        st.error("Username atau password salah.")
+                    else:
+                        st.session_state["auth_identifier"] = f"user:{uname}"
+                        st.session_state["auth_display_name"] = uname
+                        save_login_cookie(uname)
+                        st.rerun()
+
+            with tab_daftar:
+                with st.form("form_daftar_username", clear_on_submit=False):
+                    new_username = st.text_input("Buat username")
+                    new_email = st.text_input(
+                        "Email", help="Dipakai untuk reset password kalau lupa."
+                    )
+                    col_np, col_np2 = st.columns(2)
+                    with col_np:
+                        new_password = st.text_input(
+                            "Buat password", type="password", help="Minimal 6 karakter."
+                        )
+                    with col_np2:
+                        new_password2 = st.text_input("Ulangi password", type="password")
+                    submit_daftar = st.form_submit_button("Daftar Sekarang", use_container_width=True)
+
+                if submit_daftar:
+                    uname = new_username.strip().lower()
+                    email_clean = new_email.strip().lower()
+                    key = f"user:{uname}"
+                    if not uname or not new_password or not email_clean:
+                        st.error("Username, email, dan password wajib diisi.")
+                    elif "@" not in email_clean or "." not in email_clean.split("@")[-1]:
+                        st.error("Format email tidak valid.")
+                    elif len(new_password) < 6:
+                        st.error("Password minimal 6 karakter.")
+                    elif new_password != new_password2:
+                        st.error("Password dan ulangi password tidak sama.")
+                    elif key in user_db:
+                        st.error("Username sudah dipakai, coba username lain.")
+                    else:
+                        pwd_hash, salt = hash_password(new_password)
+                        user_db[key] = {
+                            "type": "username",
+                            "email": email_clean,
+                            "password_hash": pwd_hash,
+                            "salt": salt,
+                            "status": "inactive",
+                            "created_at": datetime.now().isoformat(),
+                        }
+                        save_user_db(user_db)
+                        if uname in OWNER_USERNAMES:
+                            st.success("Akun owner berhasil dibuat! Silakan masuk di tab 'Masuk'.")
+                        else:
+                            st.success(
+                                "Akun berhasil dibuat! Silakan masuk di tab 'Masuk'. "
+                                "Hubungi admin untuk aktivasi langganan."
+                            )
+
+
+def render_reset_password_page(user_db, uname, token):
+    """Halaman set password baru, diakses lewat link reset dari email.
+    Tidak butuh login dulu — validitasnya murni dari token + masa berlaku."""
+    key = f"user:{uname}"
+    record = user_db.get(key)
+
+    with st.container(key="auth_wrap"):
+        with st.container(key="auth_panel"):
+            st.markdown('<div class="auth-title">Buat Password Baru</div>', unsafe_allow_html=True)
+
+            if not is_reset_token_valid(record, token):
+                st.error(
+                    "Link reset password tidak valid atau sudah kedaluwarsa "
+                    f"(berlaku {RESET_TOKEN_VALID_HOURS} jam). Silakan minta link "
+                    "baru lewat tautan 'Lupa Password?' di halaman Masuk."
+                )
+                return
+
+            st.markdown(
+                f'<div class="auth-caption">Untuk akun <b>{html.escape(uname)}</b>.</div>',
+                unsafe_allow_html=True,
+            )
+            with st.form("form_reset_password", clear_on_submit=False):
+                new_pwd = st.text_input("Password baru", type="password", help="Minimal 6 karakter.")
+                new_pwd2 = st.text_input("Ulangi password baru", type="password")
+                submit_reset = st.form_submit_button("Simpan Password Baru", use_container_width=True)
+
+            if submit_reset:
+                if not new_pwd:
+                    st.error("Password wajib diisi.")
+                elif len(new_pwd) < 6:
+                    st.error("Password minimal 6 karakter.")
+                elif new_pwd != new_pwd2:
+                    st.error("Password dan ulangi password tidak sama.")
+                else:
+                    pwd_hash, salt = hash_password(new_pwd)
+                    user_db[key]["password_hash"] = pwd_hash
+                    user_db[key]["salt"] = salt
+                    clear_reset_token(user_db, key)
+                    save_user_db(user_db)
+                    st.success(
+                        "Password berhasil diganti! Silakan tutup halaman ini "
+                        "lalu masuk lagi lewat tab 'Masuk' dengan password baru."
+                    )
+
+
+# ---- Kalau ini kunjungan dari link reset password di email, tampilkan
+#      halaman ganti password dan berhenti di sini (tidak perlu login dulu).
+_reset_token_param = st.query_params.get("reset_token")
+_reset_uname_param = st.query_params.get("u")
+if _reset_token_param and _reset_uname_param:
+    render_reset_password_page(load_user_db(), _reset_uname_param.strip().lower(), _reset_token_param)
+    st.stop()
+
+
+# ---- Tentukan identitas user yang sedang login (kalau ada) ----
+identifier = st.session_state.get("auth_identifier")
+display_name = st.session_state.get("auth_display_name", identifier)
+
+if not identifier:
+    if st.session_state.get("skip_cookie_restore"):
+        # Baru saja logout. Jeda tetap (time.sleep) sebelumnya TIDAK cukup
+        # diandalkan di koneksi lambat -- komponen penghapus cookie butuh
+        # 1 kali pulang-pergi browser<->server yang waktunya bisa lebih
+        # dari jeda itu. Jadi di sini kita BENAR-BENAR cek: cookie-nya
+        # sudah kosong atau belum? Selama belum kosong, jangan coba
+        # restore sesi dari situ (supaya tidak auto-login lagi), dan flag
+        # "skip_cookie_restore" ini TETAP dipertahankan (tidak langsung
+        # dibuang) sampai cookie-nya benar-benar hilang di browser --
+        # dicek ulang tiap kali halaman di-refresh atau ada rerun lain.
+        if cookies.get("auth_session") is None:
+            st.session_state.pop("skip_cookie_restore", None)
+    else:
+        # Belum ada sesi di session_state (misal karena tab baru / reload) —
+        # coba pulihkan otomatis dari cookie sebelum minta login ulang.
+        _user_db_for_cookie_check = load_user_db()
+        _uname_from_cookie = load_login_cookie(_user_db_for_cookie_check)
+        if _uname_from_cookie:
+            identifier = f"user:{_uname_from_cookie}"
+            display_name = _uname_from_cookie
+            st.session_state["auth_identifier"] = identifier
+            st.session_state["auth_display_name"] = display_name
+
+if not identifier:
+    render_auth_panel(load_user_db())
+    st.stop()
+
+# ---- User sudah punya identitas, cek status langganan ----
+user_db = load_user_db()
+status = get_user_status(identifier, user_db)
+
+# Client Supabase dipakai bersama untuk Community Feed + Notifikasi.
+# Kalau secrets SUPABASE_URL/SUPABASE_SERVICE_KEY belum diisi, ini akan
+# None -- panel komunitas & bell notif otomatis nyembunyiin diri (lihat
+# guard di bawah), jadi app utama tetap jalan normal tanpa error.
+supabase_client = get_supabase_client()
+
+# ---- State awal buat data hasil scan (dipindah ke sini, sebelum header,
+# karena fragment caption "Update terakhir" di header -- lihat
+# render_header_brand_block() -- sekarang butuh manggil ensure_scanned()
+# juga, biar datanya langsung siap begitu header pertama kali dirender,
+# gak perlu nunggu sampai render_top_panel() di body Dashboard jalan.) ----
+if "scan_df" not in st.session_state:
+    st.session_state.scan_df = None
+if "last_updated" not in st.session_state:
+    st.session_state.last_updated = None
+if "last_updated_epoch" not in st.session_state:
+    st.session_state.last_updated_epoch = None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_central_scan():
+    """Baca hasil scan yang sudah disiapkan 'petugas scan' (scan_worker.py,
+    dijalankan berkala lewat GitHub Actions) dari Supabase -- BUKAN scan
+    sendiri. Ini yang bikin app cepat dibuka biarpun banyak user
+    bersamaan, karena tidak ada yang download+hitung data saham sendiri
+    tiap buka app. Return (DataFrame, waktu_update) atau (None, None)
+    kalau data pusat belum ada / gagal diambil.
+
+    PERBAIKAN (skala 1000+ user): dibungkus @st.cache_data(ttl=900) --
+    cache ini DIBAGI ke SEMUA user di server yang sama (bukan per-session
+    seperti st.session_state). Jadi walau ribuan user klik apapun
+    bersamaan, cuma ADA MAKSIMAL 1 request nyata ke Supabase tiap 15
+    menit (disamakan dengan cadence scan_worker.py) -- user lainnya
+    otomatis dapat data dari cache RAM server, nyaris instan, tanpa
+    network call sendiri-sendiri."""
+    if not supabase_client:
+        return None, None
+    try:
+        res = supabase_client.table("scan_results").select("*").eq("id", 1).execute()
+        rows = res.data or []
+        if not rows:
+            return None, None
+        records = rows[0].get("data") or []
+        if not records:
+            return None, None
+        df = pd.DataFrame(records)
+        updated_dt = None
+        updated_raw = rows[0].get("updated_at")
+        if updated_raw:
+            try:
+                updated_dt = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                updated_dt = (updated_dt + timedelta(hours=7)).replace(tzinfo=None)
+            except Exception:
+                updated_dt = None
+        return df, updated_dt
+    except Exception:
+        return None, None
+
+
+def ensure_scanned(force=False):
+    """Dipakai oleh tombol aksi & panel atas. App TIDAK PERNAH scan
+    sendiri lagi -- cukup baca hasil scan TERPUSAT dari Supabase (diisi
+    scan_worker.py tiap 15 menit lewat GitHub Actions, HANYA jam bursa).
+    Kalau data pusat kosong total (baru pertama kali setup, belum pernah
+    ada scan sukses sekalipun), df yang dikembalikan kosong -- banner di
+    render_top_panel() yang menjelaskan situasinya ke user, BUKAN dengan
+    scan langsung (biar app tetap ringan buat semua orang).
+
+    PERBAIKAN (skala 1000+ user): sekarang SELALU panggil
+    _load_central_scan() langsung -- tidak lagi menyimpan salinan manual
+    di st.session_state per-user. Karena _load_central_scan() sendiri
+    sudah di-cache (ttl=900, dibagi ke semua user), pemanggilan ini
+    nyaris gratis (baca cache RAM) kecuali cache-nya baru saja expired.
+    Efeknya: Scan / Portofolio / Top Gainer-Loser semua otomatis baca
+    sumber data yang SAMA & SINKRON, dan otomatis "ter-update" begitu
+    cache di-refresh oleh siapapun user yang kebetulan jadi pemicu
+    pertama setelah 15 menit -- tanpa perlu tombol refresh manual.
+    `force` dipertahankan untuk kompatibilitas tapi sekarang tidak
+    berefek berbeda, karena tidak ada lagi cache manual di session_state
+    yang perlu "dipaksa" dilewati."""
+    df_central, updated_dt = _load_central_scan()
+    st.session_state.scan_df = df_central if df_central is not None else pd.DataFrame()
+    st.session_state.last_updated = updated_dt
+    st.session_state.last_updated_epoch = time.time()
+    return st.session_state.scan_df
+
+
+def _go_to_dashboard():
+    """Reset semua state navigasi & query param, balik lurus ke Dashboard
+    utama -- dipakai tombol logo rumah (home) di header."""
+    st.query_params.clear()
+    st.session_state["show_portfolio"] = False
+    st.session_state["show_customer_panel"] = False
+    st.session_state["active_panel"] = None
+    st.rerun()
+
+
+# Dipindah ke sini (sebelumnya ada di dekat MENU_ITEMS, jauh di bawah)
+# karena sekarang baris kategori nav ada di header, yang di-render
+# duluan -- jadi active_panel harus sudah siap sebelum header dipakai.
+if "active_panel" not in st.session_state:
+    st.session_state.active_panel = None
+
+# Menu lama (grid 8 tombol penuh) sekarang dikelompokkan jadi 4 kategori
+# dan ditaruh sebagai popover di baris ke-3 header, biar nggak makan
+# tempat vertikal di HP (keluhan awal: "ribet, makan tempat").
+NAV_CATEGORIES = [
+    ("Scanner", [
+        ("scan", "🔍 Scan Market"),
+        ("breakout", "🚀 Breakout Scanner"),
+        ("fake", "⚠️ Fake Breakout"),
+    ]),
+    ("Trading", [
+        ("swing", "📉 Swing Alert"),
+    ]),
+    ("Bandar", [
+        ("bandar", "🐋 Bandar Detector"),
+        ("broker", "🏦 Broker Summary"),
+    ]),
+    ("Alert", [
+        ("telegram", "📲 Send Best to TG"),
+    ]),
+]
+
+is_subscriber = status in ("owner", "active")
+
+def _get_initials(name):
+    """Ambil 1-2 huruf inisial dari nama buat avatar bulat."""
+    if not name:
+        return "?"
+    parts = [p for p in str(name).strip().split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def render_header_brand_block():
+    """Blok nama app "Syariah Signal" + caption "🕒 Update terakhir: ..."
+    di header, DIGABUNG jadi satu string HTML & satu st.markdown() call
+    (bukan dua elemen terpisah) -- supaya dua baris ini dijamin bertumpuk
+    rapi sebagai anak langsung dalam satu wrapper yang sama, tanpa
+    tergantung CSS flex/gap rewel antar elemen Streamlit yang beda
+    (yang sebelumnya bikin dua baris numpuk/tabrakan, bukan bertumpuk).
+    Seluruh blok (termasuk nama app yang statis) dirender lewat fragment
+    ini supaya jam di captionnya ikut auto-refresh tiap REFRESH_SECONDS.
+    Label caption SENGAJA selalu "Update terakhir" (tidak lagi berubah
+    jadi "Data terakhir saat bursa tutup" walau di luar jam bursa) --
+    ikon jam 🕒 dipertahankan. Kalau data belum pernah ke-scan sama
+    sekali, caption-nya tidak nampilkan apa-apa dulu (biar gak dobel sama
+    info "sedang menyiapkan data" yang sudah ada di body Dashboard).
+
+    PERBAIKAN: fragment ini sekarang manggil ensure_scanned() sendiri
+    (bukan cuma numpang baca session_state yang diisi render_top_panel())
+    -- soalnya ensure_scanned() cuma baca cache bersama yang sudah
+    di-cache (ttl=900, nyaris gratis), dan header dirender DULUAN
+    sebelum render_top_panel(). Tanpa ini, caption sempat kosong lama
+    (sampai 15 menit) di run pertama karena fragment ini & fragment
+    render_top_panel() jalan independen dengan jadwal masing-masing."""
+    ensure_scanned()
+    updated_dt = st.session_state.get("last_updated")
+    caption_html = ""
+    if updated_dt is not None:
+        last_upd_time = updated_dt.strftime("%H:%M")
+        last_upd_hari_tanggal = format_hari_tanggal_id(updated_dt)
+        caption_html = (
+            f'<div class="app_update_caption">'
+            f'<div class="app_update_line1">🕒 Update harga terakhir: {last_upd_time} WIB</div>'
+            f'<div class="app_update_line2">{last_upd_hari_tanggal}</div>'
+            f'</div>'
+        )
+    st.markdown(
+        f'<div class="app_brand_name">Syariah Signal</div>{caption_html}',
+        unsafe_allow_html=True,
+    )
+
+
+with st.container(key="header_status_bar"):
+    # ---- baris 1: nama app + caption update (sisa ruang, ditumpuk) +
+    # portofolio + notif + avatar ----
+    col_brand, col_portfolio, col_notif, col_avatar = st.columns([2.6, 0.5, 0.55, 0.7])
+
+    with col_brand:
+        render_header_brand_block()
+
+    with col_portfolio:
+        if is_subscriber:
+            if st.button("💼", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
+                st.session_state["show_portfolio"] = True
+                st.rerun()
+
+    with col_notif:
+        if is_subscriber and supabase_client:
+            render_notification_bell(supabase_client, user_id=identifier)
+
+    # ---- Avatar (emoji orang polos) = trigger dropdown (popover) berisi
+    # status langganan, Privasi Akun & Logout. Status (owner/aktif/belum)
+    # sekarang cuma muncul DI DALAM popover, bukan di avatar-nya sendiri.
+    # PERBAIKAN: sempat dicoba icon font (Material Symbols) tapi gagal
+    # load di beberapa koneksi -- sekarang pakai emoji 👤 biasa, bawaan
+    # sistem, jadi dijamin tampil di HP manapun tanpa gantung font
+    # eksternal. ----
+
+    # PERBAIKAN: st.popover bawaan Streamlit TIDAK otomatis nutup diri
+    # sendiri kalau tombol DI DALAMNYA diklik lalu trigger st.rerun() --
+    # popover-nya kebuka lagi setelah rerun karena widget key-nya sama
+    # persis. Solusinya: kasih popover ini "key" yang berubah tiap kali
+    # ada aksi di dalamnya (Kelola Pelanggan/Privasi Akun/Logout) --
+    # Streamlit jadi menganggapnya widget baru (state awal = tertutup),
+    # jadi begitu opsi diklik, popover otomatis ketutup sendiri.
+    if "profile_popover_seed" not in st.session_state:
+        st.session_state["profile_popover_seed"] = 0
+    _popover_key = f"profile_popover_{st.session_state['profile_popover_seed']}"
+
+    with col_avatar:
+        with st.container(key="profile_avatar_wrap"):
+            with st.popover("👤", use_container_width=True, key=_popover_key):
+                st.markdown(f"**{display_name}**")
+                if status == "owner":
+                    st.success("👑 Owner access granted")
+                    st.divider()
+                    if st.button("🗂️ Kelola Pelanggan", use_container_width=True, key="open_customer_panel_btn"):
+                        st.session_state["show_customer_panel"] = True
+                        st.session_state["profile_popover_seed"] += 1
+                        st.rerun()
+                elif status == "active":
+                    st.success("✅ Subscription aktif")
+                    _sub_info = get_subscription_info(identifier, user_db)
+                    if _sub_info and _sub_info.get("subscribed_at") and _sub_info.get("expires_at"):
+                        try:
+                            _mulai_dt = datetime.fromisoformat(_sub_info["subscribed_at"])
+                            _akhir_dt = datetime.fromisoformat(_sub_info["expires_at"])
+                            _plan_label = PLAN_LABELS.get(_sub_info["plan"], _sub_info["plan"] or "-")
+                            st.caption(
+                                f"Paket **{_plan_label}**  \n"
+                                f"Mulai: {format_tanggal_id(_mulai_dt)}  \n"
+                                f"Berakhir: {format_tanggal_id(_akhir_dt)} "
+                                f"(sisa {_sub_info['days_left']} hari)"
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                else:
+                    st.warning("❌ Belum berlangganan")
+                st.divider()
+                if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
+                    st.session_state.active_panel = "privacy"
+                    st.session_state["profile_popover_seed"] += 1
+                    st.rerun()
+                if st.button("🚪 Logout", use_container_width=True, key="logout_btn"):
+                    st.session_state["profile_popover_seed"] += 1
+                    st.session_state.pop("auth_identifier", None)
+                    st.session_state.pop("auth_display_name", None)
+                    clear_login_cookie()
+                    # Cegah cookie lama (yang mungkin belum sempat kehapus di
+                    # browser saat rerun ini terjadi) auto-login-in kita lagi.
+                    # Flag ini sekarang TIDAK langsung dibuang di rerun berikutnya
+                    # -- dia dipertahankan sampai kode di atas benar-benar
+                    # verifikasi cookie-nya sudah kosong (lihat blok
+                    # "skip_cookie_restore" di dekat pengecekan identifier).
+                    # Ini penting terutama di koneksi lambat, supaya user tidak
+                    # ke-auto-login lagi walau proses hapus cookie di komponen
+                    # JS-nya butuh waktu lebih dari 1 kali render.
+                    st.session_state["skip_cookie_restore"] = True
+                    # Jeda singkat ini cuma bantuan awal (bukan jaminan) supaya
+                    # komponen cookie sempat mulai proses hapus sebelum halaman
+                    # di-render ulang -- verifikasi sebenarnya tetap dilakukan
+                    # lewat pengecekan cookies.get() di atas.
+                    with st.spinner("Logout..."):
+                        time.sleep(0.35)
+                    st.rerun()
+
+    # ---- baris 2: nav -- semua jadi TEKS kapital polos (icon dibuang --
+    # font eksternalnya gagal load). Tombol langsung nampilin nama,
+    # gak ada label terpisah lagi di bawahnya (satu teks per tombol,
+    # gak dobel). Sekarang SELALU tampil semua (5 kolom), termasuk buat
+    # yang belum berlangganan -- penguncian akses kategori nanti menyusul,
+    # bukan disembunyikan dari tampilan (permintaan terbaru). ----
+    n_icons = 1 + len(NAV_CATEGORIES)
+    with st.container(key="nav_icon_row"):
+        icon_cols = st.columns(n_icons)
+        with icon_cols[0]:
+            if st.button("HOME", key="home_btn", use_container_width=True, help="Home"):
+                _go_to_dashboard()
+        # PERBAIKAN (bug: dropdown kategori gak nutup sendiri): sama kayak
+        # popover profil di atas -- st.popover bawaan Streamlit TIDAK
+        # otomatis nutup diri kalau tombol DI DALAMNYA diklik lalu trigger
+        # st.rerun(). Popovernya kebuka lagi setelah rerun/pindah halaman
+        # karena widget key-nya sama persis. Solusinya sama: tiap kategori
+        # (Scanner/Trading/Bandar/Alert) dikasih "seed" counter sendiri di
+        # session_state yang di-+1 tiap kali ada item di dalamnya diklik,
+        # dan seed itu dipakai jadi bagian dari key popovernya -- jadi
+        # Streamlit nganggep popover itu widget baru (state awal =
+        # tertutup) begitu user pindah ke panel yang dipilih.
+        for i, (cat_name, cat_items) in enumerate(NAV_CATEGORIES):
+            _seed_state_key = f"nav_popover_seed_{i}"
+            if _seed_state_key not in st.session_state:
+                st.session_state[_seed_state_key] = 0
+            _cat_popover_key = f"nav_popover_{i}_{st.session_state[_seed_state_key]}"
+            with icon_cols[i + 1]:
+                with st.popover(cat_name.upper(), use_container_width=True, help=cat_name, key=_cat_popover_key):
+                    for panel_key, panel_label in cat_items:
+                        if st.button(panel_label, use_container_width=True, key=f"nav_{panel_key}"):
+                            # PERBAIKAN BUG: sebelumnya cuma set active_panel,
+                            # jadi kalau lagi di halaman Portofolio/Customer
+                            # Panel (show_portfolio / show_customer_panel True),
+                            # klik menu Scanner/Trading/Bandar/Alert TIDAK
+                            # NGARUH -- karena kedua flag itu punya prioritas
+                            # render lebih tinggi & gak pernah direset di sini
+                            # (beda dari tombol HOME yang resetnya lengkap,
+                            # lihat _go_to_dashboard()). Disamakan sekarang.
+                            st.session_state["show_portfolio"] = False
+                            st.session_state["show_customer_panel"] = False
+                            st.session_state.active_panel = panel_key
+                            st.session_state[_seed_state_key] += 1
+                            st.rerun()
+
+# ---- Banner soft: sisa masa aktif <=3 hari ----
+# Sengaja diletakkan di sini (segera setelah header, SEBELUM percabangan
+# show_portfolio/show_customer_panel/active_panel manapun), supaya tampil
+# terus menerus di halaman apapun yang lagi dibuka, bukan cuma di dashboard,
+# dan tanpa perlu diklik/dibuka dulu (beda dari popover yang perlu diklik).
+if status == "active":
+    _sub_info_banner = get_subscription_info(identifier, user_db)
+    if _sub_info_banner and 0 <= _sub_info_banner["days_left"] <= 3:
+        _sisa = _sub_info_banner["days_left"]
+        _sisa_txt = "hari ini" if _sisa == 0 else f"{_sisa} hari lagi"
+        st.info(f"⏳ Masa aktif langganan kamu tinggal {_sisa_txt}. Yuk perpanjang biar akses gak terputus.")
+
+if status not in ("owner", "active"):
+    st.stop()
+
+# ---- Bar Komunitas -- fixed nempel di bawah layar, tetap kelihatan di
+# halaman/panel manapun (posisinya di-pin lewat CSS position:fixed, jadi
+# taruh di sini -- di awal script, sebelum semua percabangan panel --
+# tidak masalah, dia akan tetap muncul di bawah pada tiap rerun). ----
+with st.container(key="bottom_komunitas_bar"):
+    if st.button("💬 Komunitas", key="komunitas_bottom_btn", use_container_width=True):
+        # PERBAIKAN BUG: sama seperti tombol nav popover di atas -- tanpa
+        # ini, klik "Komunitas" gak ngaruh kalau lagi di halaman
+        # Portofolio/Customer Panel.
+        st.session_state["show_portfolio"] = False
+        st.session_state["show_customer_panel"] = False
+        st.session_state.active_panel = "community"
+        st.rerun()
+
+# ============================================================
+#  AUTO-REFRESH CONTROL (non-blocking, TIDAK nge-freeze seluruh halaman)
+# ============================================================
+# PERBAIKAN: versi lama (PRO.py / PRO_v2.py) pakai time.sleep(60) + st.rerun(),
+# yang MEMBLOKIR seluruh server thread selama 60 detik (app freeze total buat
+# semua user).
+#
+# PERBAIKAN (biar gak "burem"/nunggu): sebelumnya dipakai streamlit_autorefresh,
+# yang me-rerun SELURUH halaman tiap tick — jadi walaupun cuma panel Top
+# Gainer/Loser yang butuh update, semua elemen lain (termasuk hasil di bagian
+# bawah) ikut nge-freeze/pudar sebentar tiap kali rerun terjadi. Sekarang
+# dipakai st.fragment: panel Top Gainer/Loser dibungkus jadi "fragment" yang
+# refresh SENDIRIAN di background sesuai jadwal (run_every), tanpa menyentuh
+# atau nge-freeze bagian lain dari halaman sama sekali. Butuh streamlit >= 1.33.
+#
+# PERBAIKAN (kecepatan): data pusat (yfinance untuk .JK) baru berubah tiap
+# ~15 menit, jadi auto-refresh disamakan jadi 15 menit (bukan 30-60 detik lagi).
+#
+# CATATAN: tidak ada lagi kontrol auto-refresh/refresh manual di sidebar.
+# Data sudah diperbarui otomatis di belakang layar oleh sistem pusat
+# (scan_worker.py -> Supabase) tiap ~15 menit; user tinggal pakai data itu
+# tanpa perlu ngatur atau memicu refresh sendiri. Panel Top Gainer/Loser
+# tetap baca ulang data terbaru tiap 15 menit lewat st.fragment (diam-diam,
+# tanpa UI/countdown). (REFRESH_SECONDS sekarang didefinisikan di atas,
+# dekat st.set_page_config, biar bisa dipakai fragment caption header juga.)
+manual_refresh_clicked = False
+
+# ============================================================
+#  DATA + INDIKATOR TEKNIKAL
+# ============================================================
+def _display_ticker(t):
+    """Buang suffix .JK biar tampilan UI cukup nama sahamnya aja, mis. DEWA.JK -> DEWA."""
+    return t[:-3] if t.endswith(".JK") else t
+
+
+def pct_change(df):
+    prev = df['Close'].iloc[-2]
+    now = df['Close'].iloc[-1]
+    return (now - prev) / prev * 100
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_quick_quote_cached(ticker_jk):
+    """Harga terakhir + %perubahan untuk 1 saham (ISSI maupun bukan) --
+    dibaca dari tabel `stock_quotes` di Supabase (diisi scan_worker.py
+    tiap ~15 menit untuk SEMUA saham IDX), BUKAN panggil yfinance
+    langsung. Dipakai di 2 tempat: (1) validasi pas "Tambah ke
+    Portofolio" (cek kode sahamnya ada/valid), (2) render_portfolio_page
+    (tampilan harga saham non-ISSI yang sudah dipegang). Return None
+    kalau ticker tidak ditemukan / belum pernah ke-scan."""
+    try:
+        res = (
+            supabase_client.table("stock_quotes")
+            .select("price, change_pct")
+            .eq("ticker", ticker_jk)
+            .execute()
+        )
+        if not res.data:
+            return None
+        row = res.data[0]
+        if row.get("price") is None:
+            return None
+        return {"price": row["price"], "change_pct": row.get("change_pct")}
+    except Exception:
+        return None
+
+
+def score_badge(score):
+    """Tampilkan angka score dengan warna gradasi: makin rendah makin
+    merah, naik ke oranye/kuning di tengah, makin tinggi makin hijau.
+    Pakai HSL supaya transisinya halus (bukan cuma 3 warna patah-patah)."""
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return str(score)
+    s_clamped = max(0.0, min(100.0, s))
+    hue = s_clamped * 1.2  # 0 = merah, ~60 = kuning/oranye, 120 = hijau
+    color = f"hsl({hue:.0f}, 75%, 50%)"
+    display_val = int(s) if float(s).is_integer() else s
+    return f'<span style="color:{color}; font-weight:700;">{display_val}</span>'
+
+
+def render_html_table(df):
+    """Render dataframe sebagai tabel HTML custom supaya header bisa dibuat
+    KAPITAL + rata tengah + lebih besar (st.dataframe bawaan Streamlit
+    menggambar header di canvas jadi tidak bisa di-styling pakai CSS)."""
+    if df is None or df.empty:
+        st.info("Tidak ada data.")
+        return
+
+    # Kolom-kolom persentase naik/turun -- diwarnai ijo/merah konsisten
+    # dengan .gain-up/.gain-down yang sudah dipakai di Portofolio, Top
+    # Gainer/Loser, dan tabel histori harga saham.
+    PCT_GAIN_LOSS_COLS = {"change_pct", "week_change_pct"}
+    # Kolom harga (rupiah) -- dulu tampil mentah (mis. "1250.0"), sekarang
+    # dirapikan pakai format_harga() (titik ribuan, tanpa desimal), sama
+    # kayak yang sudah dipakai di Top Gainer/Loser, Portofolio, dll.
+    PRICE_COLS = {"price", "entry", "tp", "sl"}
+    # Kolom "drop" (dipakai di Swing Alert) -- persentase turun dari swing
+    # high, ditampilkan pakai tanda minus + warna merah (gain-down), sama
+    # gaya kayak kolom persen lain.
+
+    df_fmt = df.copy()
+    for col in df_fmt.columns:
+        if df_fmt[col].dtype == bool:
+            df_fmt[col] = df_fmt[col].map(lambda v: "✔️" if v else "–")
+
+    header_html = "".join(
+        f"<th>{str(col).replace('_', ' ').upper()}</th>" for col in df_fmt.columns
+    )
+    body_rows = []
+    for pos, (idx, row) in enumerate(df_fmt.iterrows(), start=1):
+        cells = ""
+        for col in df_fmt.columns:
+            if col == "stock":
+                # Nama saham diklik -> pindah ke halaman detail saham itu
+                # (lihat render_stock_detail_page), lewat query param URL.
+                cells += f'<td><a class="stock-link" href="?stock={row[col]}" target="_self">{row[col]}</a></td>'
+            elif col == "score":
+                cells += f'<td>{score_badge(row[col])}</td>'
+            elif col == "signal":
+                cells += f'<td>{signal_badge(row[col])}</td>'
+            elif col in PCT_GAIN_LOSS_COLS and pd.notna(row[col]):
+                _v = row[col]
+                _cls = "gain-up" if _v >= 0 else "gain-down"
+                cells += f'<td><span class="{_cls}">{_v:+.2f}%</span></td>'
+            elif col in PRICE_COLS and pd.notna(row[col]):
+                cells += f"<td>{format_harga(row[col])}</td>"
+            elif col == "drop" and pd.notna(row[col]):
+                _d = abs(row[col])
+                cells += f'<td><span class="gain-down">-{_d:.1f}%</span></td>'
+            else:
+                cells += f"<td>{row[col]}</td>"
+        # Lencana buat 3 peringkat teratas (tabel sudah terurut dari skor
+        # tertinggi -- data & urutannya datang dari scan_results Supabase),
+        # biar user langsung tahu peringkat itu dinilai dari skor.
+        medal = {1: "🥇 ", 2: "🥈 ", 3: "🥉 "}.get(pos, "")
+        body_rows.append(f"<tr><td>{medal}{pos}</td>{cells}</tr>")
+
+    table_html = f"""
+    <div class="scan-table-wrap">
+      <table class="scan-table">
+        <thead><tr><th>NO</th>{header_html}</tr></thead>
+        <tbody>{''.join(body_rows)}</tbody>
+      </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def signal_badge(sig):
+    if "BUY" in sig:
+        cls = "badge-buy"
+    elif "HOLD" in sig:
+        cls = "badge-hold"
+    else:
+        cls = "badge-sell"
+    return f'<span class="badge {cls}">{sig}</span>'
+
+
+# ============================================================
+#  BROKER SUMMARY (via GOAPI.IO) — kode broker + volume beli/jual
+#  per saham, khusus data EOD (End of Day / pas bursa tutup).
+# ============================================================
+def last_trading_date():
+    """Tentukan 'tanggal bursa terakhir' yang datanya sudah pasti closing:
+    - Weekend (Sabtu/Minggu) -> mundur ke hari Jumat terakhir.
+    - Hari kerja tapi masih di bawah jam 16:00 WIB -> data hari ini
+      belum tentu final, jadi mundur ke hari kerja sebelumnya.
+    - Hari kerja setelah jam 16:00 WIB -> pakai tanggal hari ini.
+    CATATAN: ini TIDAK memperhitungkan tanggal merah/libur bursa
+    (butuh kalender libur BEI kalau mau 100% akurat), jadi anggap
+    sebagai perkiraan yang cukup baik untuk kebanyakan kasus.
+    """
+    now = datetime.now()
+    d = now.date()
+    if now.weekday() < 5 and now.hour >= 16:
+        pass  # hari kerja, sudah lewat jam tutup -> pakai hari ini
+    else:
+        # mundur ke hari kerja sebelumnya (Senin=0 ... Minggu=6)
+        d = d - timedelta(days=1)
+        while d.weekday() >= 5:
+            d = d - timedelta(days=1)
+    return d
+
+
+@st.cache_data(ttl=20 * 3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_broker_summary(symbol, date_str):
+    """Ambil ringkasan broker (kode broker, sisi beli/jual, lot, value,
+    avg price, tipe investor) untuk 1 saham pada 1 tanggal tertentu.
+    date_str format: YYYY-MM-DD. Return (DataFrame, error_message).
+
+    SUMBER: tabel `broker_summary` di Supabase, diisi 1x/hari oleh
+    scan_worker.py (bukan panggil GOAPI langsung dari sini lagi) --
+    jadi API key GOAPI juga sudah tidak perlu ada di app/Secrets sama
+    sekali, cukup di GitHub Actions Secrets. Kalau tanggal yang diminta
+    belum pernah di-scan (mis. tanggal jauh di masa lalu, sebelum
+    sistem ini berjalan), akan kosong dengan pesan yang menjelaskan itu.
+    """
+    try:
+        res = (
+            supabase_client.table("broker_summary")
+            .select("data, error_message")
+            .eq("ticker", symbol)
+            .eq("date", date_str)
+            .execute()
+        )
+        if not res.data:
+            return pd.DataFrame(), (
+                "Belum ada data broker tersimpan untuk tanggal ini "
+                "(kemungkinan sebelum sistem pusat mulai scan, atau "
+                "bukan hari bursa)."
+            )
+        row = res.data[0]
+        if row.get("error_message"):
+            return pd.DataFrame(), row["error_message"]
+        records = row.get("data") or []
+        if not records:
+            return pd.DataFrame(), None
+        return pd.DataFrame(records), None
+    except Exception as e:
+        return pd.DataFrame(), f"Gagal ambil data broker dari Supabase: {e}"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _broker_data_available():
+    """Cek apakah tabel `broker_summary` di Supabase sudah pernah diisi
+    scan_worker.py (artinya GOAPI_API_KEY sudah dikonfigurasi di GitHub
+    Actions Secrets & job harian sudah pernah jalan sukses). Dipakai
+    buat gate 'locked / segera hadir' di panel Broker Summary."""
+    try:
+        res = supabase_client.table("broker_summary").select("ticker").limit(1).execute()
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def broker_category_class(investor_value):
+    """Petakan field 'investor' dari GOAPI ke kelas CSS warna kategori
+    broker. Sengaja fleksibel (cocokkan substring, bukan exact-match)
+    karena kita belum punya dokumentasi pasti nilai persis yang dikirim
+    GOAPI — kalau nilainya di luar dugaan, jatuh ke kategori netral
+    (bukan nebak/salah kategorikan)."""
+    v = str(investor_value or "").strip().lower()
+    if "asing" in v or "foreign" in v:
+        return "broker-foreign"
+    if "domestik" in v or "domestic" in v or "lokal" in v or "local" in v or "retail" in v or "ritel" in v:
+        return "broker-domestic"
+    return "broker-other"
+
+
+def get_top5_broker_net(symbol, date_str, top_n=5):
+    """Hitung Top-N broker net buy & net sell (net = total value beli -
+    total value jual per kode broker) untuk 1 saham + 1 tanggal, dari 1x
+    panggilan fetch_broker_summary() (SUDAH di-cache 20 jam) — jadi
+    top-5-nya sendiri TIDAK menambah panggilan API sama sekali, murni
+    olah data di Python. Return (top_buyers, top_sellers, error) — tiap
+    item dict {"broker_code", "net", "category_class"}."""
+    df, err = fetch_broker_summary(symbol, date_str)
+    if err:
+        return [], [], err
+    if df is None or df.empty:
+        return [], [], None
+
+    def _net_per_broker(g):
+        buy_val = g.loc[g["side"].str.startswith("B", na=False), "value"].sum()
+        sell_val = g.loc[g["side"].str.startswith("S", na=False), "value"].sum()
+        investor = g["investor"].iloc[0] if len(g) else "-"
+        return pd.Series({"net": buy_val - sell_val, "investor": investor})
+
+    grouped = df.groupby("broker_code").apply(_net_per_broker).reset_index()
+    if grouped.empty:
+        return [], [], None
+
+    def _to_items(sub_df):
+        return [
+            {
+                "broker_code": row["broker_code"],
+                "net": row["net"],
+                "category_class": broker_category_class(row["investor"]),
+            }
+            for _, row in sub_df.iterrows()
+        ]
+
+    top_buyers = _to_items(grouped[grouped["net"] > 0].sort_values("net", ascending=False).head(top_n))
+    top_sellers = _to_items(grouped[grouped["net"] < 0].sort_values("net", ascending=True).head(top_n))
+    return top_buyers, top_sellers, None
+
+
+def resample_price_history(hist, freq):
+    """Ubah data histori harian (kolom Date, Close, Volume) jadi ringkasan
+    per minggu ('W') atau per bulan ('M'): harga penutupan periode itu,
+    %perubahan dari periode sebelumnya, dan total volume selama periode
+    itu. Return DataFrame terurut TERBARU DI ATAS."""
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    df = hist.copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    agg = df.resample(freq).agg({"Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+    if agg.empty:
+        return pd.DataFrame()
+    agg["pct_change"] = agg["Close"].pct_change() * 100
+    agg = agg.reset_index().sort_values("Date", ascending=False)
+    return agg
+
+
+def _render_broker_summary_panel():
+    """Isi panel Broker Summary yang fungsional (dipanggil hanya kalau
+    ada data broker tersimpan di Supabase -- lihat gate 'locked' di
+    panel UI, _broker_data_available())."""
+    default_date = last_trading_date()
+    bcol1, bcol2, bcol3 = st.columns([2, 1, 1])
+    with bcol1:
+        broker_symbol = st.selectbox(
+            "Pilih saham",
+            options=ISSI_STOCKS,
+            format_func=_display_ticker,
+            key="broker_symbol_select",
+        )
+    with bcol2:
+        broker_date = st.date_input(
+            "Tanggal (hari bursa)",
+            value=default_date,
+            max_value=datetime.now().date(),
+            key="broker_date_input",
+        )
+    with bcol3:
+        st.write("")
+        st.write("")
+        fetch_broker_clicked = st.button("🔄 Ambil Data", key="fetch_broker_btn")
+
+    # Banner "data ini terakhir tanggal & jam berapa" — supaya kalau
+    # dibuka besok pagi langsung kelihatan ini data closing kemarin.
+    st.markdown(
+        f'<div class="update-strip">'
+        f'<span>🕒 Data Broker untuk: <b>{broker_date.strftime("%d %B %Y")}</b> '
+        f'pukul <b>16:00 WIB</b> (closing/EOD)</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    broker_cache_key = f"{broker_symbol}_{broker_date.isoformat()}"
+    if (
+        fetch_broker_clicked
+        or st.session_state.get("broker_last_key") != broker_cache_key
+    ):
+        with st.spinner(f"Mengambil broker summary {_display_ticker(broker_symbol)}..."):
+            df_broker, broker_err = fetch_broker_summary(broker_symbol, broker_date.isoformat())
+        st.session_state.broker_df = df_broker
+        st.session_state.broker_err = broker_err
+        st.session_state.broker_last_key = broker_cache_key
+
+    df_broker = st.session_state.get("broker_df", pd.DataFrame())
+    broker_err = st.session_state.get("broker_err")
+
+    if broker_err:
+        st.error("Data broker sedang tidak bisa diambil, coba lagi sebentar lagi.")
+        if status == "owner":
+            st.caption(
+                f"[Owner] Detail error: {broker_err} — cek di sisi "
+                "scan_worker.py (GitHub Actions), BUKAN di Streamlit "
+                "Secrets: (1) GOAPI_API_KEY sudah diisi di GitHub Actions "
+                "Secrets, (2) endpoint/header di fetch_broker_summary() "
+                "(scan_engine.py) sudah cocok dokumentasi resmi GOAPI "
+                "(goapi.io/docs), (3) kuota API belum habis, (4) workflow "
+                "GitHub Actions jalan tanpa error (cek tab Actions di repo)."
+            )
+    elif df_broker.empty:
+        st.info(
+            f"Belum ada data broker untuk {_display_ticker(broker_symbol)} "
+            f"pada {broker_date.strftime('%d %B %Y')}. Coba tanggal hari "
+            "bursa lain (bukan Sabtu/Minggu/libur bursa)."
+        )
+    else:
+        buyers = (
+            df_broker[df_broker["side"].str.contains("B", na=False)]
+            .sort_values("value", ascending=False)
+        )
+        sellers = (
+            df_broker[df_broker["side"].str.contains("S", na=False)]
+            .sort_values("value", ascending=False)
+        )
+
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.markdown("**🟢 Top Broker Pembeli**")
+            if buyers.empty:
+                st.caption("Tidak ada data broker pembeli.")
+            else:
+                st.dataframe(
+                    buyers[["broker_code", "broker_name", "lot", "value", "avg", "investor"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        with bc2:
+            st.markdown("**🔴 Top Broker Penjual**")
+            if sellers.empty:
+                st.caption("Tidak ada data broker penjual.")
+            else:
+                st.dataframe(
+                    sellers[["broker_code", "broker_name", "lot", "value", "avg", "investor"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        total_buy_val = buyers["value"].sum() if not buyers.empty else 0
+        total_sell_val = sellers["value"].sum() if not sellers.empty else 0
+        net_val = total_buy_val - total_sell_val
+        st.markdown(
+            f'<div class="card">Total Beli: <b>{total_buy_val:,.0f}</b> &nbsp;|&nbsp; '
+            f'Total Jual: <b>{total_sell_val:,.0f}</b> &nbsp;|&nbsp; '
+            f'Net: <b>{net_val:+,.0f}</b> '
+            f'({"AKUMULASI 🟢" if net_val > 0 else "DISTRIBUSI 🔴" if net_val < 0 else "NETRAL"})'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def send_telegram(msg):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=10,
+        )
+        return True
+    except Exception:
+        return False
+
+
+
+# ============================================================
+#  HEADER — search bar cari saham (dipanggil ulang di SETIAP halaman:
+#  Dashboard, Portofolio, Kelola Pelanggan, dan semua panel fitur
+#  seperti Scan Market/Bandar/Breakout/dll -- bukan cuma di Dashboard)
+# ============================================================
+def render_stock_search_bar(form_key):
+    with st.container(key=f"{form_key}_wrap"):
+        with st.form(form_key, clear_on_submit=False):
+            _search_col1, _search_col2 = st.columns([6, 1], gap="small")
+            with _search_col1:
+                _query = st.text_input(
+                    "Cari saham",
+                    placeholder="Cari kode saham, mis. ICBP",
+                    label_visibility="collapsed",
+                    key=f"{form_key}_input",
+                )
+            with _search_col2:
+                _submitted = st.form_submit_button("🔍", use_container_width=True)
+    if _submitted and _query.strip():
+        st.query_params["stock"] = _query.strip().upper()
+        st.rerun()
+
+
+# CATATAN: render_stock_search_bar("dashboard_search_form") TIDAK dipanggil
+# di sini lagi -- sekarang search bar cuma tampil di halaman Dashboard
+# (lihat blok "if st.session_state.active_panel is None" di bawah) dan di
+# halaman Detail Saham (render_stock_detail_page). Halaman Portofolio,
+# Kelola Pelanggan, dan panel fitur (Scan/Bandar/dll) TIDAK lagi menampilkan
+# search bar.
+
+# ---- State awal (scan_df/last_updated) & fungsi ensure_scanned/
+# _load_central_scan dipindah ke ATAS file, sebelum header -- lihat
+# dekat definisi supabase_client -- karena sekarang fragment caption
+# header (render_header_brand_block) juga butuh manggil ensure_scanned().
+
+def render_portfolio_page(user_db, identifier, display_name):
+    """Halaman 'Portofolio Saya' — daftar saham pribadi user, dengan data
+    lengkap (harga, %harian, %mingguan, sinyal, status bandar) untuk saham
+    ISSI, dan data dasar SAJA (harga + %harian) untuk saham non-syariah,
+    tanpa sinyal/rekomendasi apa pun untuk yang non-syariah."""
+    with st.container(key="panel_header_tight"):
+        st.markdown("### 💼 Portofolio Saya")
+
+    st.markdown(
+        '<div class="disclaimer-wrap">'
+        '<input type="checkbox" id="portfolio-disclaimer-toggle" class="disclaimer-checkbox">'
+        '<label for="portfolio-disclaimer-toggle" class="disclaimer-icon">ℹ️ Tentang portofolio ini</label>'
+        '<label for="portfolio-disclaimer-toggle" class="disclaimer-backdrop"></label>'
+        '<div class="disclaimer-popup">Tambahkan kode saham yang kamu pantau. '
+        'Saham ISSI (syariah) dapat data lengkap; saham non-syariah cuma '
+        'ditampilkan harga &amp; perubahan harian, tanpa sinyal/rekomendasi.'
+        '<br><span class="disclaimer-hint">Tap di luar kotak buat tutup</span></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.container(key="portfolio_add_search_form_wrap"):
+        with st.form("form_add_portfolio", clear_on_submit=True):
+            col_add_input, col_add_btn = st.columns([6, 1])
+            with col_add_input:
+                new_code = st.text_input(
+                    "Tambah kode saham", placeholder="Contoh: ICBP", label_visibility="collapsed"
+                )
+            with col_add_btn:
+                submit_add = st.form_submit_button("➕", use_container_width=True, help="Tambah ke portofolio")
+
+    if submit_add:
+        ok, err = add_to_portfolio(user_db, identifier, new_code)
+        if ok:
+            st.success(f"{new_code.strip().upper()} ditambahkan ke portofolio.")
+        else:
+            st.error(err)
+
+    portfolio = get_user_portfolio(user_db, identifier)
+    if not portfolio:
+        st.info("Portofolio kamu masih kosong. Tambahkan kode saham di atas.")
+        return
+
+    df_scan = ensure_scanned()  # pakai cache kalau sudah ada, scan sekali kalau belum
+
+    rows_html = []
+    for code in portfolio:
+        ticker_jk = f"{code}.JK"
+        is_syariah = ticker_jk in ISSI_STOCKS
+        remove_key = f"remove_portfolio_{code}"
+
+        if is_syariah:
+            match = df_scan[df_scan["stock"] == ticker_jk] if df_scan is not None else None
+            if match is not None and not match.empty:
+                r = match.iloc[0]
+                price = format_harga(r['price'])
+                score_txt = score_badge(r["score"])
+                daily = r["change_pct"]
+                weekly = r.get("week_change_pct", None)
+                weekly_txt = f"{weekly:+.2f}%" if weekly is not None else "–"
+                daily_cls = "gain-up" if daily >= 0 else "gain-down"
+                weekly_cls = "gain-up" if (weekly or 0) >= 0 else "gain-down"
+                sig_html = signal_badge(r["signal"])
+                bandar_txt = r["bandar"]
+                row_cls = ""
+            else:
+                price, daily_cls, weekly_txt, weekly_cls = "–", "", "–", ""
+                daily = None
+                score_txt = "–"
+                sig_html = '<span class="badge badge-neutral">DATA BELUM ADA</span>'
+                bandar_txt = "–"
+                row_cls = ""
+        else:
+            # PERBAIKAN: sebelumnya baris non-syariah masih nampilin
+            # harga/%harian per kolom (isinya sering "–" semua kalau quote
+            # gagal diambil, kelihatan kosong/bingung). Sekarang disatukan
+            # jadi 1 sel lebar penuh bertuliskan "TIDAK SYARIAH" dengan
+            # tint merah transparan (lihat CSS .nonsyariah-cell) -- kode
+            # sahamnya sendiri tetap ditampilkan & tetap bisa diklik.
+            rows_html.append(
+                f'<tr>'
+                f'<td><a class="stock-link" href="?stock={ticker_jk}" target="_self"><b>{code}</b></a></td>'
+                f'<td class="nonsyariah-cell" colspan="6">⚠️ TIDAK SYARIAH — tanpa data &amp; sinyal</td>'
+                f'</tr>'
+            )
+            continue
+
+        daily_txt = f"{daily:+.2f}%" if daily is not None else "–"
+        rows_html.append(
+            f'<tr class="{row_cls}">'
+            f'<td><a class="stock-link" href="?stock={ticker_jk}" target="_self"><b>{code}</b></a></td>'
+            f'<td>{price}</td>'
+            f'<td class="{daily_cls}">{daily_txt}</td>'
+            f'<td class="{weekly_cls}">{weekly_txt}</td>'
+            f'<td>{score_txt}</td>'
+            f'<td>{sig_html}</td>'
+            f'<td>{bandar_txt}</td>'
+            f'</tr>'
+        )
+
+    table_html = f"""
+    <div class="portfolio-table-wrap">
+      <table class="portfolio-table">
+        <thead><tr>
+          <th>KODE</th><th>HARGA</th><th>%HARI INI</th><th>%MINGGU INI</th><th>SCORE</th>
+          <th>STATUS</th><th>BANDAR</th>
+        </tr></thead>
+        <tbody>{''.join(rows_html)}</tbody>
+      </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+    st.markdown("##### Hapus saham dari portofolio")
+    col_del_select, col_del_btn = st.columns([4, 1])
+    with col_del_select:
+        code_to_remove = st.selectbox(
+            "Pilih saham", portfolio, label_visibility="collapsed", key="portfolio_remove_select"
+        )
+    with col_del_btn:
+        if st.button("🗑️ Hapus", use_container_width=True, key="delete_portfolio_stock_btn"):
+            remove_from_portfolio(user_db, identifier, code_to_remove)
+            st.rerun()
+
+
+if st.session_state.get("show_portfolio"):
+    render_portfolio_page(user_db, identifier, display_name)
+    st.stop()
+
+
+def render_customer_panel(user_db):
+    """Halaman khusus Owner (dibuka lewat tombol 'Kelola Pelanggan' di
+    popover nama akun): daftar SEMUA pelanggan beserta status/paket/tanggal
+    langganan masing-masing, plus form aktivasi/perpanjangan manual --
+    dipakai selama Stripe belum live / untuk koreksi manual selagi app
+    belum dibuka ke umum."""
+    st.markdown("### 🗂️ Kelola Pelanggan")
+
+    st.markdown("##### Aktivasi / Perpanjang Manual")
+    semua_username = sorted(
+        k[len("user:"):] for k in user_db.keys()
+        if k.startswith("user:") and k[len("user:"):] not in OWNER_USERNAMES
+    )
+    if not semua_username:
+        st.info("Belum ada akun pelanggan yang terdaftar.")
+    else:
+        with st.form("form_activate_customer", clear_on_submit=False):
+            col_u, col_p, col_btn = st.columns([2, 2, 1])
+            with col_u:
+                target_username = st.selectbox("Pilih user", semua_username)
+            with col_p:
+                target_plan = st.selectbox(
+                    "Pilih paket",
+                    list(PLAN_DURATIONS.keys()),
+                    format_func=lambda p: PLAN_LABELS.get(p, p),
+                )
+            with col_btn:
+                st.markdown("<br>", unsafe_allow_html=True)
+                submit_activate = st.form_submit_button("✅ Aktifkan", use_container_width=True)
+
+        if submit_activate:
+            activate_subscription(user_db, f"user:{target_username}", target_plan)
+            st.success(
+                f"Langganan {target_username} diaktifkan -- paket {PLAN_LABELS.get(target_plan, target_plan)}."
+            )
+            st.rerun()
+
+    st.divider()
+    st.markdown("##### Semua Pelanggan")
+
+    rows_html = []
+    total_active = 0
+    for key in sorted(user_db.keys()):
+        if not key.startswith("user:"):
+            continue
+        uname = key[len("user:"):]
+        if uname in OWNER_USERNAMES:
+            continue
+        record = user_db.get(key, {})
+        rec_status = record.get("status", "inactive")
+        if rec_status == "active":
+            total_active += 1
+        sub_info = get_subscription_info(key, user_db)
+        if sub_info and sub_info.get("subscribed_at") and sub_info.get("expires_at"):
+            try:
+                mulai_dt = datetime.fromisoformat(sub_info["subscribed_at"])
+                akhir_dt = datetime.fromisoformat(sub_info["expires_at"])
+                plan_label = PLAN_LABELS.get(sub_info["plan"], sub_info["plan"] or "-")
+                mulai_txt = format_tanggal_id(mulai_dt)
+                akhir_txt = format_tanggal_id(akhir_dt)
+                sisa_txt = f"{sub_info['days_left']} hari"
+            except (ValueError, TypeError):
+                plan_label, mulai_txt, akhir_txt, sisa_txt = "-", "-", "-", "-"
+        else:
+            plan_label, mulai_txt, akhir_txt, sisa_txt = "-", "-", "-", "-"
+
+        status_html = (
+            '<span class="badge badge-buy">Aktif</span>'
+            if rec_status == "active"
+            else '<span class="badge badge-sell">Belum/Nonaktif</span>'
+        )
+
+        rows_html.append(
+            f"<tr><td>{uname}</td><td>{record.get('email', '-')}</td>"
+            f"<td>{status_html}</td><td>{plan_label}</td>"
+            f"<td>{mulai_txt}</td><td>{akhir_txt}</td><td>{sisa_txt}</td></tr>"
+        )
+
+    st.caption(f"Total pelanggan aktif: **{total_active}** dari {len(rows_html)} akun terdaftar.")
+
+    table_html = f"""
+    <div class="portfolio-table-wrap">
+      <table class="portfolio-table">
+        <thead><tr>
+          <th>USERNAME</th><th>EMAIL</th><th>STATUS</th><th>PAKET</th>
+          <th>MULAI</th><th>BERAKHIR</th><th>SISA</th>
+        </tr></thead>
+        <tbody>{''.join(rows_html) if rows_html else '<tr><td colspan="7">Belum ada pelanggan.</td></tr>'}</tbody>
+      </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+if st.session_state.get("show_customer_panel"):
+    if status != "owner":
+        st.session_state["show_customer_panel"] = False
+    else:
+        render_customer_panel(user_db)
+        st.stop()
+
+
+# ============================================================
+#  HALAMAN DETAIL SAHAM — muncul saat nama saham diklik di tabel
+# ============================================================
+# ============================================================
+#  HALAMAN DETAIL SAHAM — muncul saat nama saham diklik di tabel
+# ============================================================
+# SEMUA data di halaman ini (histori harga, fundamental) sekarang
+# dibaca dari Supabase (diisi 1x/hari untuk histori panjang & sekali/
+# 15 menit untuk intraday oleh scan_worker.py) -- app TIDAK PERNAH lagi
+# manggil yfinance langsung dari sini. Ini yang nutup akar masalah
+# segmentation fault: dulu tiap user buka halaman detail saham, app
+# manggil yfinance (curl_cffi) sendiri-sendiri secara bersamaan.
+
+# Pilihan rentang waktu grafik histori harga. "days" dipakai untuk hitung
+# rentang tanggal yang di-slice dari data harian terpusat ("ytd" = sejak
+# 1 Januari tahun berjalan, None = semua data sejak IPO yang ada).
+# "resample" ("W"/"ME") dipakai untuk rentang panjang biar jumlah titik
+# tetap wajar. "1 Hari"/"1 Minggu" sumbernya beda -- dari stock_intraday
+# (candle 5 menit), bukan slice dari data harian.
+PERIOD_OPTIONS = {
+    "1 Hari": {"days": 1, "source": "intraday"},
+    "1 Minggu": {"days": 7, "source": "intraday", "resample": "30min"},
+    "1 Bulan": {"days": 30, "source": "daily"},
+    "Tahun Ini (YTD)": {"days": "ytd", "source": "daily"},
+    "1 Tahun": {"days": 365, "source": "daily"},
+    "3 Tahun": {"days": 365 * 3, "source": "daily", "resample": "W"},
+    "5 Tahun": {"days": 365 * 5, "source": "daily", "resample": "W"},
+    "Sejak IPO (Max)": {"days": None, "source": "daily", "resample": "ME"},
+}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_daily_history_df(ticker_jk):
+    """Baca histori harian (panjang, dari IPO) dari Supabase, cache 15
+    menit dibagi semua user. Return DataFrame(Date, Open, High, Low,
+    Close, Volume) urut TERLAMA -> TERBARU, atau None kalau belum ada."""
+    try:
+        res = supabase_client.table("stock_history").select("data").eq("ticker", ticker_jk).execute()
+        if not res.data or not res.data[0].get("data"):
+            return None
+        df = pd.DataFrame(res.data[0]["data"])
+        df = df.rename(columns={"date": "Date", "open": "Open", "high": "High",
+                                 "low": "Low", "close": "Close", "volume": "Volume"})
+        df["Date"] = pd.to_datetime(df["Date"])
+        return df.sort_values("Date").reset_index(drop=True)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_intraday_history_df(ticker_jk):
+    """Baca histori intraday (candle 5 menit, ~5 hari terakhir) dari
+    Supabase, cache 15 menit dibagi semua user."""
+    try:
+        res = supabase_client.table("stock_intraday").select("data").eq("ticker", ticker_jk).execute()
+        if not res.data or not res.data[0].get("data"):
+            return None
+        df = pd.DataFrame(res.data[0]["data"])
+        df = df.rename(columns={"date": "Date", "open": "Open", "high": "High",
+                                 "low": "Low", "close": "Close", "volume": "Volume"})
+        df["Date"] = pd.to_datetime(df["Date"])
+        return df.sort_values("Date").reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def _resample_ohlcv(df, freq):
+    """Resample DataFrame OHLCV (kolom Date/Open/High/Low/Close/Volume)
+    ke frekuensi lain (mis. '30min', 'W', 'ME') dengan agregasi yang
+    benar per kolom (bukan cuma ambil Close)."""
+    d = df.set_index("Date").sort_index()
+    agg = d.resample(freq).agg({
+        "Open": "first", "High": "max", "Low": "min",
+        "Close": "last", "Volume": "sum",
+    }).dropna(subset=["Close"])
+    return agg.reset_index()
+
+
+def get_stock_history(ticker_jk, period_label):
+    """Histori harga untuk 1 saham sesuai rentang waktu yang dipilih
+    user (lihat PERIOD_OPTIONS) -- semua di-derive dari data terpusat
+    Supabase (stock_history / stock_intraday), tanpa panggilan live
+    apapun ke yfinance."""
+    cfg = PERIOD_OPTIONS.get(period_label, PERIOD_OPTIONS["1 Tahun"])
+    days = cfg["days"]
+
+    if cfg["source"] == "intraday":
+        df = _load_intraday_history_df(ticker_jk)
+        if df is None or df.empty:
+            return None
+        if period_label == "1 Hari":
+            last_day = df["Date"].dt.date.max()
+            df = df[df["Date"].dt.date == last_day].reset_index(drop=True)
+        resample_freq = cfg.get("resample")
+        if resample_freq:
+            df = _resample_ohlcv(df, resample_freq)
+        return df if not df.empty else None
+
+    df = _load_daily_history_df(ticker_jk)
+    if df is None or df.empty:
+        return None
+
+    if days == "ytd":
+        start = datetime(datetime.now().year, 1, 1)
+        df = df[df["Date"] >= start]
+    elif days is not None:
+        start = datetime.now() - timedelta(days=days)
+        df = df[df["Date"] >= start]
+    # days is None ("Sejak IPO") -> pakai semua data, tidak difilter
+
+    resample_freq = cfg.get("resample")
+    if resample_freq:
+        df = _resample_ohlcv(df, resample_freq)
+
+    df = df.reset_index(drop=True)
+    return df if not df.empty else None
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_stock_fundamentals(ticker_jk):
+    """Info fundamental dasar 1 saham, dibaca dari Supabase (diisi 1x/
+    hari oleh scan_worker.py). Field kosong ditandai None -> ditampilkan
+    'Data tidak tersedia' di halaman detail."""
+    fields = {
+        "nama": None, "sektor": None, "industri": None,
+        "market_cap": None, "per": None, "eps": None, "mata_uang": None,
+    }
+    try:
+        res = supabase_client.table("stock_fundamentals").select("*").eq("ticker", ticker_jk).execute()
+        if res.data:
+            row = res.data[0]
+            for key in fields:
+                fields[key] = row.get(key)
+    except Exception:
+        pass
+    return fields
+
+
+def _fmt_metric(value, decimals=None):
+    """Format angka buat ditampilkan, atau 'Data tidak tersedia' kalau kosong."""
+    if value is None or value == "":
+        return "Data tidak tersedia"
+    if isinstance(value, (int, float)):
+        if decimals is not None:
+            return f"{value:,.{decimals}f}"
+        return f"{value:,}"
+    return str(value)
+
+
+def _compute_trading_rangebreaks(date_series):
+    """Deteksi celah waktu SECARA OTOMATIS dari data histori yang benar-benar
+    ada (bukan asumsi jam bursa tetap) — jadi ini otomatis menangani jam
+    istirahat siang, tutup malam, akhir pekan, MAUPUN hari libur bursa
+    (karena hari libur otomatis tidak punya baris data sama sekali, sehingga
+    kelihatan sebagai jarak yang lebih besar dari biasanya). Celah yang
+    jaraknya jauh lebih besar dari jarak antar-candle biasa akan
+    disembunyikan dari chart, supaya candle sebelum & sesudahnya nyambung
+    langsung tanpa ruang kosong."""
+    ts = pd.to_datetime(date_series).sort_values().reset_index(drop=True)
+    if len(ts) < 3:
+        return []
+    diffs = ts.diff().dropna()
+    typical = diffs.median()
+    if typical <= pd.Timedelta(0):
+        return []
+    breaks = []
+    for i in range(1, len(ts)):
+        gap = ts.iloc[i] - ts.iloc[i - 1]
+        # Jarak lebih dari 1.5x jarak normal antar-candle -> dianggap
+        # waktu bursa tutup (istirahat siang / malam / akhir pekan / libur).
+        if gap > typical * 1.5:
+            breaks.append(dict(bounds=[ts.iloc[i - 1].isoformat(), ts.iloc[i].isoformat()]))
+    return breaks
+
+
+def render_stock_detail_page(ticker_raw):
+    """Halaman khusus 1 saham: histori 1 tahun, fundamental, ringkasan
+    sinyal dari hasil scan terakhir, dan berita — dibuka lewat query
+    param ?stock=KODE saat nama saham diklik di tabel."""
+    ticker_no_jk = str(ticker_raw).upper().strip().replace(".JK", "")
+    ticker_jk = f"{ticker_no_jk}.JK"
+
+    render_stock_search_bar("stock_detail_search_form")
+
+    df_scan = st.session_state.get("scan_df")
+    scan_row = None
+    if df_scan is not None and not df_scan.empty:
+        match = df_scan[df_scan["stock"] == ticker_jk]
+        if not match.empty:
+            scan_row = match.iloc[0]
+
+    # Fundamental diambil di sini (di-cache 6 jam, lihat get_stock_fundamentals)
+    # supaya sektor/industrinya bisa langsung tampil di sebelah kode saham,
+    # sekaligus dipakai ulang lagi nanti di section "Info Fundamental" di
+    # bawah tanpa perlu fetch dua kali.
+    with st.spinner("Mengambil info fundamental..."):
+        fundamentals = get_stock_fundamentals(ticker_jk)
+    _fund_bits = [b for b in [fundamentals.get("sektor"), fundamentals.get("industri")] if b]
+    fund_inline = " • ".join(_fund_bits) if _fund_bits else "Info fundamental tidak tersedia"
+
+    sub_line = "Belum ada di hasil scan terakhir"
+    if scan_row is not None:
+        _chg = scan_row.get("change_pct")
+        if _chg is not None and pd.notna(_chg):
+            _chg_cls = "gain-up" if _chg >= 0 else "gain-down"
+            _chg_html = f' <span class="{_chg_cls}">({_chg:+.2f}%)</span>'
+        else:
+            _chg_html = ""
+        sub_line = f"Harga terakhir: {format_harga(scan_row['price'])}{_chg_html}"
+    badge_html = signal_badge(scan_row["signal"]) if scan_row is not None else ""
+    st.markdown(
+        f"""
+        <div class="terminal-header">
+            <div>
+                <div class="terminal-title">{ticker_no_jk} <span class="stock-fund-inline">{fund_inline}</span></div>
+                <div class="terminal-sub">{sub_line}</div>
+            </div>
+            <div>{badge_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ---- Histori harga (rentang waktu bisa dipilih) ----
+    st.subheader("📊 Histori Harga")
+    pcol1, pcol2 = st.columns([3, 2])
+    with pcol1:
+        period_label = st.radio(
+            "Rentang waktu",
+            list(PERIOD_OPTIONS.keys()),
+            index=4,  # default: "1 Tahun"
+            horizontal=True,
+            key="detail_period",
+        )
+    with pcol2:
+        chart_type = st.radio(
+            "Tampilan grafik", ["Candlestick", "Line"], horizontal=True, key="detail_chart_type"
+        )
+    with st.spinner("Mengambil data histori..."):
+        hist = get_stock_history(ticker_jk, period_label)
+
+    if hist is None or hist.empty:
+        st.info("Data tidak tersedia untuk saham ini.")
+    else:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.75, 0.25], vertical_spacing=0.03,
+        )
+        if chart_type == "Candlestick":
+            fig.add_trace(
+                go.Candlestick(
+                    x=hist["Date"], open=hist["Open"], high=hist["High"],
+                    low=hist["Low"], close=hist["Close"], name="Harga",
+                    increasing_line_color="#22c55e", decreasing_line_color="#ef4444",
+                ),
+                row=1, col=1,
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=hist["Date"], y=hist["Close"], mode="lines", name="Close",
+                    line=dict(color="#ffb35a", width=2),
+                ),
+                row=1, col=1,
+            )
+        fig.add_trace(
+            go.Bar(x=hist["Date"], y=hist["Volume"], name="Volume", marker_color="#5865f2"),
+            row=2, col=1,
+        )
+        fig.update_layout(
+            height=520, showlegend=False,
+            margin=dict(l=10, r=10, t=10, b=10),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#f3f2ef"),
+            xaxis_rangeslider_visible=False,
+        )
+        fig.update_xaxes(gridcolor="rgba(255,255,255,0.06)")
+        fig.update_yaxes(gridcolor="rgba(255,255,255,0.06)")
+        # Sembunyikan SEMUA celah waktu bursa tutup (istirahat siang, malam,
+        # akhir pekan, hari libur) secara otomatis, supaya candle nyambung
+        # langsung dari satu sesi/hari buka bursa ke sesi/hari buka berikutnya.
+        auto_breaks = _compute_trading_rangebreaks(hist["Date"])
+        if auto_breaks:
+            fig.update_xaxes(rangebreaks=auto_breaks)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ---- Tabel Histori Harga (harian/mingguan/bulanan) ----
+    st.subheader("🗓️ Tabel Histori Harga")
+    hist_mode = st.radio(
+        "Tampilan tabel",
+        ["Harian (1 Bulan)", "Mingguan (1 Tahun)", "Bulanan (1 Tahun)"],
+        horizontal=True,
+        key="detail_hist_table_mode",
+    )
+
+    if hist_mode == "Harian (1 Bulan)":
+        with st.spinner("Mengambil data harian..."):
+            hist_daily = get_stock_history(ticker_jk, "1 Bulan")
+        if hist_daily is None or hist_daily.empty:
+            st.info("Data histori harian tidak tersedia.")
+        else:
+            df_daily = hist_daily.copy()
+            df_daily["Date"] = pd.to_datetime(df_daily["Date"])
+            df_daily = df_daily.sort_values("Date")
+            df_daily["pct_change"] = df_daily["Close"].pct_change() * 100
+            df_daily = df_daily.sort_values("Date", ascending=False).reset_index(drop=True)
+
+            # Broker Top 5 Net Buy/Sell CUMA untuk 3 hari bursa TERAKHIR
+            # (dan cuma tersedia kalau scan_worker.py sudah pernah nyimpen
+            # broker_summary buat tanggal itu -- datanya dari Supabase,
+            # bukan panggilan API live dari app).
+            broker_col_html = {}
+            if _broker_data_available():
+                for i in range(min(3, len(df_daily))):
+                    d = df_daily.iloc[i]["Date"]
+                    date_str = d.strftime("%Y-%m-%d")
+                    with st.spinner(f"Mengambil data broker {date_str}..."):
+                        buyers, sellers, berr = get_top5_broker_net(ticker_jk, date_str)
+                    if berr:
+                        broker_col_html[i] = ("–", "–")
+                        continue
+                    buy_html = " ".join(
+                        f'<span class="broker-chip {b["category_class"]}">{b["broker_code"]}</span>'
+                        for b in buyers
+                    ) or "–"
+                    sell_html = " ".join(
+                        f'<span class="broker-chip {s["category_class"]}">{s["broker_code"]}</span>'
+                        for s in sellers
+                    ) or "–"
+                    broker_col_html[i] = (buy_html, sell_html)
+
+            rows_html = []
+            for i, row in df_daily.iterrows():
+                pct = row["pct_change"]
+                pct_txt = f"{pct:+.2f}%" if pd.notna(pct) else "–"
+                pct_cls = "gain-up" if (pd.notna(pct) and pct >= 0) else ("gain-down" if pd.notna(pct) else "")
+                buy_html, sell_html = broker_col_html.get(i, ("–", "–"))
+                rows_html.append(
+                    f"<tr><td>{row['Date'].strftime('%d %b %Y')}</td>"
+                    f"<td>{row['Close']:,.0f}</td>"
+                    f'<td class="{pct_cls}">{pct_txt}</td>'
+                    f"<td>{int(row['Volume']):,}</td>"
+                    f"<td>{buy_html}</td>"
+                    f"<td>{sell_html}</td></tr>"
+                )
+            broker_note = (
+                "Top 5 broker (3 hari bursa terakhir saja)"
+                if _broker_data_available()
+                else "Data top 5 broker belum tersedia untuk saham ini"
+            )
+            st.markdown(
+                f"""
+                <div class="hist-table-wrap">
+                  <table class="hist-table">
+                    <thead><tr>
+                      <th>TANGGAL</th><th>HARGA</th><th>%PERUBAHAN</th><th>VOLUME</th>
+                      <th>TOP 5 NET BUY</th><th>TOP 5 NET SELL</th>
+                    </tr></thead>
+                    <tbody>{''.join(rows_html)}</tbody>
+                  </table>
+                </div>
+                <div style="margin-top:6px;">
+                    <span class="broker-chip broker-foreign">ASING</span>
+                    <span class="broker-chip broker-domestic">DOMESTIK/RITEL</span>
+                    <span class="broker-chip broker-other">LAINNYA</span>
+                    &nbsp;•&nbsp;{broker_note}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        freq = "W" if hist_mode.startswith("Mingguan") else "ME"
+        with st.spinner("Mengambil data histori 1 tahun..."):
+            hist_long = get_stock_history(ticker_jk, "1 Tahun")
+        agg = resample_price_history(hist_long, freq)
+        if agg.empty:
+            st.info("Data tidak tersedia untuk rentang ini.")
+        else:
+            rows_html = []
+            for _, row in agg.iterrows():
+                pct = row["pct_change"]
+                pct_txt = f"{pct:+.2f}%" if pd.notna(pct) else "–"
+                pct_cls = "gain-up" if (pd.notna(pct) and pct >= 0) else ("gain-down" if pd.notna(pct) else "")
+                label = row["Date"].strftime("%d %b %Y") if freq == "W" else row["Date"].strftime("%B %Y")
+                rows_html.append(
+                    f"<tr><td>{label}</td>"
+                    f"<td>{row['Close']:,.0f}</td>"
+                    f'<td class="{pct_cls}">{pct_txt}</td>'
+                    f"<td>{int(row['Volume']):,}</td></tr>"
+                )
+            st.markdown(
+                f"""
+                <div class="hist-table-wrap">
+                  <table class="hist-table">
+                    <thead><tr><th>PERIODE</th><th>HARGA</th><th>%PERUBAHAN</th><th>VOLUME</th></tr></thead>
+                    <tbody>{''.join(rows_html)}</tbody>
+                  </table>
+                </div>
+                <div style="margin-top:6px; color:#9ca3af; font-size:12px;">
+                    Kolom broker cuma tersedia di tampilan Harian (data broker per hari bursa, bukan mingguan/bulanan).
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # ---- Fundamental (detail lengkap; ringkasan sektor/industri sudah
+    # ditampilkan di sebelah kode saham di atas, `fundamentals` di sini
+    # pakai hasil yang sama, sudah di-cache jadi tidak fetch dua kali) ----
+    st.subheader("🏢 Info Fundamental")
+    fcols = st.columns(3)
+    fcols[0].metric("Sektor", fundamentals["sektor"] or "Data tidak tersedia")
+    fcols[1].metric("Industri", fundamentals["industri"] or "Data tidak tersedia")
+    fcols[2].metric("Market Cap", _fmt_metric(fundamentals["market_cap"]))
+    fcols2 = st.columns(3)
+    fcols2[0].metric("PER", _fmt_metric(fundamentals["per"], decimals=2))
+    fcols2[1].metric("EPS", _fmt_metric(fundamentals["eps"], decimals=2))
+    fcols2[2].metric("Mata Uang", fundamentals["mata_uang"] or "Data tidak tersedia")
+
+    if not fundamentals.get("sektor") and not fundamentals.get("per"):
+        st.caption(
+            "📡 Data fundamental saham ini belum tersedia (kemungkinan "
+            "belum sempat ter-scan oleh sistem pusat, atau Yahoo Finance "
+            "memang tidak punya data lengkap untuk saham ini)."
+        )
+
+    # ---- Ringkasan sinyal dari hasil scan terakhir ----
+    st.subheader("🧭 Ringkasan Sinyal (Hasil Scan Terakhir)")
+    if scan_row is None:
+        st.info(
+            "Saham ini belum ada di hasil scan terakhir. Klik 🔍 SCAN MARKET "
+            "di dashboard dulu untuk data sinyal terbaru."
+        )
+    else:
+        scols = st.columns(4)
+        scols[0].metric("Entry", scan_row["entry"])
+        scols[1].metric("TP", scan_row["tp"])
+        scols[2].metric("SL", scan_row["sl"])
+        scols[3].metric("Score", scan_row["score"])
+        st.caption(
+            "📈 Trend & Score di atas dipakai untuk label prediksi arah "
+            "di panel Top Gainers/Losers. Kartu di bawah ini beda -- itu "
+            "cuma bacaan kondisi HARI INI (candle terakhir), bukan prediksi."
+        )
+        st.markdown(
+            f'<div class="card">🗓️ <b>Kondisi Hari Ini</b> (bukan prediksi besok) &nbsp;•&nbsp; '
+            f'Bandar: <b>{scan_row["bandar"]}</b> &nbsp;•&nbsp; '
+            f'Swing Drop: <b>{"Ya" if scan_row["swing"] else "Tidak"} '
+            f'({scan_row["drop"]}%)</b> &nbsp;•&nbsp; '
+            f'Fake Breakout: <b>{"Ya" if scan_row["fake_breakout"] else "Tidak"}</b> &nbsp;•&nbsp; '
+            f'Climax Risk: <b>{"Ya" if scan_row["climax_risk"] else "Tidak"}</b> &nbsp;•&nbsp; '
+            f'Weak Close: <b>{"Ya" if scan_row["weak_close"] else "Tidak"}</b></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ---- Berita khusus saham ini — ditaruh paling bawah ----
+    st.subheader("📰 Berita Terbaru")
+    with st.spinner("Mengambil berita terbaru..."):
+        news_items_raw = fetch_stock_news(ticker_jk, f"{ticker_no_jk} saham", max_items=8)
+
+    if not news_items_raw:
+        st.info(
+            "Belum ada berita terbaru untuk saham ini (data berita "
+            "diperbarui 1x/hari oleh sistem pusat)."
+        )
+    else:
+        for article in news_items_raw:
+            sentiment = article.get("sentiment", "NETRAL")
+            emoji = article.get("sentiment_emoji", "⚪")
+            with st.container(border=True):
+                st.markdown(f"**{article['title']}**")
+                cols = st.columns([1, 2])
+                cols[0].markdown(f"{emoji} {sentiment}")
+                meta = " · ".join(x for x in [article["source"], article["pub_date"]] if x)
+                if meta:
+                    cols[1].caption(meta)
+                if article["description"]:
+                    st.caption(
+                        article["description"][:220]
+                        + ("..." if len(article["description"]) > 220 else "")
+                    )
+                if article["link"]:
+                    st.markdown(f"[Baca selengkapnya]({article['link']})")
+
+
+# Kalau URL punya query param ?stock=KODE (dari klik nama saham di tabel),
+# tampilkan HALAMAN DETAIL SAHAM saja, dan hentikan render dashboard biasa
+# (Top Gainers/Losers, tombol aksi, panel scan) di bawahnya.
+_stock_param = st.query_params.get("stock")
+if _stock_param:
+    render_stock_detail_page(_stock_param)
+    st.stop()
+
+
+# ============================================================
+#  TOP GAINERS / TOP LOSERS — FRAGMENT TERPISAH
+# ============================================================
+# PERBAIKAN (bug lama): sebelumnya @st.fragment(run_every=...) salah
+# nempel di _is_market_hours() (cuma fungsi cek jam bursa, tidak
+# me-render apapun) -- bukan di render_top_panel() yang benar-benar
+# menggambar panel & narik data. Efeknya panel ini TIDAK PERNAH benar-
+# benar auto-refresh sendiri di background seperti niatnya.
+#
+# PERBAIKAN (skala 1000+ user): sekarang dekorator dipindah ke
+# render_top_panel() yang sebenarnya, DAN fungsi ini sudah tidak lagi
+# fetch berat langsung -- cukup panggil ensure_scanned() yang di baliknya
+# baca _load_central_scan() ber-cache (ttl=900, dibagi semua user). Jadi
+# walau fragment ini jalan tiap 15 menit di ribuan tab user bersamaan,
+# hampir semuanya cuma baca cache RAM (murah) -- cuma 1 dari mereka yang
+# kebetulan "kena" saat cache expired yang benar-benar fetch ke Supabase.
+def _is_market_hours(now_dt):
+    """Senin-Jumat, 09:00-16:15 (asumsi waktu server = WIB, konsisten
+    dengan konvensi yang sudah dipakai di last_trading_date())."""
+    if now_dt.weekday() >= 5:  # Sabtu(5) / Minggu(6)
+        return False
+    t = now_dt.time()
+    return dtime_cls(9, 0) <= t <= dtime_cls(16, 15)
+
+
+@st.fragment(run_every=REFRESH_SECONDS)
+def render_top_panel():
+    # TIDAK PERNAH scan sendiri di sini -- ensure_scanned() cuma baca
+    # cache bersama (_load_central_scan, ttl=900). Kalau data pusat
+    # kosong, df yang balik kosong -- ditangani di banner status di
+    # bawah (bukan dengan scan langsung, biar app tetap ringan).
+    ensure_scanned()
+
+    # ---- Banner status kesegaran data (dilihat SEMUA user) ----
+    is_owner_view = status == "owner"
+    updated_dt = st.session_state.last_updated
+    now_dt = datetime.now()
+
+    if updated_dt is None:
+        st.info("📊 Sedang menyiapkan data, mohon tunggu beberapa menit.")
+        if is_owner_view:
+            st.caption(
+                "⚠️ [Owner] Belum pernah ada scan yang berhasil sama sekali — "
+                "cek tab **Actions** di GitHub (\"Scan Saham Terpusat\" → Run workflow)."
+            )
+    else:
+        last_upd_str = updated_dt.strftime("%H:%M, %d %b %Y")
+        market_open = _is_market_hours(now_dt)
+        stale = (now_dt - updated_dt) > timedelta(minutes=30)
+
+        if market_open and stale:
+            if is_owner_view:
+                st.warning(
+                    f"⚠️ [Owner] Data belum diperbarui >30 menit (terakhir: "
+                    f"{last_upd_str} WIB) — cek GitHub Actions/petugas scan."
+                )
+            else:
+                st.warning(f"⏳ Data sedang diperbarui, mohon tunggu sebentar. (Terakhir: {last_upd_str} WIB)")
+        # Kondisi normal (data segar) dulu nampilin banner "Update terakhir"
+        # di sini (.update-strip) -- sekarang sudah pindah ke header,
+        # ditumpuk di bawah nama app "Syariah Signal" (lihat
+        # render_header_brand_block()), jadi tidak dirender dobel di sini.
+
+    df_scan_preview = st.session_state.scan_df
+    if df_scan_preview is not None and not df_scan_preview.empty:
+        ranked = df_scan_preview.sort_values("change_pct", ascending=False)
+        # PERBAIKAN: tampung sampai 50 saham per panel (bukan cuma 3), tapi
+        # dibungkus container scroll biar tinggi UI tetap cuma ~5 baris kelihatan.
+        gainers = ranked.head(50)
+        losers = ranked.tail(50).sort_values("change_pct")
+
+        def _gainer_loser_label(r):
+            """Label PREDIKSI ARAH KEDEPAN untuk panel Top Gainers/Losers --
+            bukan lagi deskripsi 'apa yang lagi terjadi hari ini'.
+
+            Dipakai: `trend` (EMA20 vs EMA50 -- struktur menengah, beberapa
+            minggu) + `signal`/skor gabungan (RSI, MACD, ADX, Bollinger,
+            VWAP, Fibonacci, breakout, jarak ke support -- lihat scoring()
+            di scan_engine.py). Keduanya dihitung dari histori multi-hari,
+            jadi punya bobot forward-looking yang lebih masuk akal
+            dibanding baca 1 candle terakhir doang.
+
+            SENGAJA tidak dipakai lagi di sini: `bandar` (AKUMULASI/
+            DISTRIBUSI/MARKUP -- snapshot volume+harga HARI INI aja),
+            `fake_breakout`, `climax_risk`, `weak_close` (semua baca
+            kelemahan/pola closing HARI INI, bukan prediksi besok). Semua
+            itu sekarang cuma tampil di halaman Detail Saham (klik nama
+            saham) sebagai 'Kondisi Hari Ini'.
+
+            CATATAN: ini tetap bias probabilistik dari struktur teknikal
+            terakhir, BUKAN jaminan/ramalan pasti."""
+            chg = r.get("change_pct", 0) or 0
+            trend = str(r.get("trend", ""))
+            sig = str(r.get("signal", ""))
+            bullish = "Bullish" in trend
+            bearish = "Bearish" in trend
+            is_buy = "BUY" in sig  # cocok utk "BUY" & "STRONG BUY 🚀"
+            is_sell = "SELL" in sig
+            is_hold = "HOLD" in sig
+
+            if chg >= 0:
+                if bearish and is_sell:
+                    return "gl-bad", "🔴 Rawan Balik Turun"
+                if bearish:
+                    return "gl-warn", "🟠 Rawan Balik Turun"
+                if bullish and is_buy:
+                    return "gl-good", "🟢 Berpotensi Lanjut Naik"
+                if bullish and is_hold:
+                    return "gl-caution", "🟡 Momentum Melemah"
+                return "gl-neutral", "⚪ Netral"
+            else:
+                if bullish and (is_buy or is_hold):
+                    return "gl-rebound", "🔵 Potensi Rebound"
+                if bearish and is_sell:
+                    return "gl-bad", "🔴 Berpotensi Lanjut Turun"
+                if bearish:
+                    return "gl-warn", "🟠 Rawan Lanjut Tertekan"
+                return "gl-neutral", "⚪ Netral"
+
+        def _render_scroll_list(rows):
+            items_html = "".join(
+                (lambda cls, label: (
+                    f'<div class="scroll-item">'
+                    f'<a class="stock-link" href="?stock={_display_ticker(r["stock"])}" target="_self">'
+                    f'{_display_ticker(r["stock"])}</a> — {format_harga(r["price"])} '
+                    f'<span class="{"gain-up" if r["change_pct"] >= 0 else "gain-down"}">'
+                    f'({r["change_pct"]:+.2f}%)</span> '
+                    f'<span class="gl-tag {cls}">{label}</span></div>'
+                ))(*_gainer_loser_label(r))
+                for _, r in rows.iterrows()
+            )
+            return f'<div class="scroll-list">{items_html}</div>'
+
+        gcol, lcol = st.columns(2)
+        with gcol:
+            st.markdown(
+                '<div class="gainer-loser-label-row">'
+                '<span class="gainer-loser-label">Top 50 Gainers</span>'
+                '<input type="checkbox" id="disclaimer-toggle" class="disclaimer-checkbox">'
+                '<label for="disclaimer-toggle" class="disclaimer-icon">ℹ️</label>'
+                '<label for="disclaimer-toggle" class="disclaimer-backdrop"></label>'
+                '<div class="disclaimer-popup">Label di bawah ini prediksi arah '
+                '<b>KEDEPAN</b> berdasarkan trend &amp; skor teknikal (bukan jaminan). '
+                'Kondisi hari ini (bandar, fake breakout, dll) ada di halaman Detail '
+                'Saham -- klik nama sahamnya.'
+                '<span class="disclaimer-hint">Tap di luar kotak buat tutup</span>'
+                '</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(_render_scroll_list(gainers), unsafe_allow_html=True)
+        with lcol:
+            st.markdown('<div class="gainer-loser-label gainer-loser-label-losers">Top 50 Losers</div>', unsafe_allow_html=True)
+            st.markdown(_render_scroll_list(losers), unsafe_allow_html=True)
+
+
+# ============================================================
+#  NEWS SECTION — dipanggil dari dalam halaman dashboard saja (lihat
+#  blok NAVIGASI di bawah). Kalau ada panel yang
+#  lagi dibuka (Scan/Bandar/dst), otomatis nongol DI BAWAH panel itu
+#  (karena Python jalan top-to-bottom, pemanggilannya ditaruh setelah
+#  semua blok "if active_panel == ..."). Kalau tidak ada panel dibuka,
+#  otomatis nongol di bawah baris tombol aksi.
+# ============================================================
+def _build_stock_news_queries(df_scan, user_db, identifier, top_n=15):
+    """Gabungan ticker untuk tab 'Saham': saham portofolio user (KHUSUS
+    yang syariah/terdaftar ISSI) + top-N skor tertinggi hasil scan,
+    duplikat dibuang (portofolio didahulukan di urutan)."""
+    portfolio_codes = get_user_portfolio(user_db, identifier) if identifier else []
+    portfolio_tickers = [
+        f"{c}.JK" for c in portfolio_codes if f"{c}.JK" in ISSI_STOCKS
+    ]
+    top_tickers = []
+    if df_scan is not None and not df_scan.empty:
+        top_tickers = df_scan.head(top_n)["stock"].tolist()
+    combined = list(dict.fromkeys(portfolio_tickers + top_tickers))  # dedup, urutan dijaga
+    return combined, set(portfolio_tickers)
+
+
+def _render_news_cards(news_items, show_stock_tag):
+    """Render daftar berita sebagai card, dibungkus container tinggi tetap
+    (~10 berita kelihatan, sisanya bisa discroll)."""
+    with st.container(height=420):
+        for news in news_items:
+            with st.container(border=True):
+                st.markdown(f"**{news['title']}**")
+                if show_stock_tag and news["matched_stocks"]:
+                    stocks_str = ", ".join(t.replace(".JK", "") for t in news["matched_stocks"])
+                    cols = st.columns([1, 1, 2])
+                    cols[0].markdown(f"📈 Saham: `{stocks_str}`")
+                    cols[1].markdown(f"{news['sentiment_emoji']} {news['sentiment']}")
+                    meta_col = cols[2]
+                else:
+                    cols = st.columns([1, 3])
+                    cols[0].markdown(f"{news['sentiment_emoji']} {news['sentiment']}")
+                    meta_col = cols[1]
+                meta = " · ".join(x for x in [news["source"], news["pub_date"]] if x)
+                if meta:
+                    meta_col.caption(meta)
+                if news["description"]:
+                    st.caption(news["description"][:220] + ("..." if len(news["description"]) > 220 else ""))
+                if news["link"]:
+                    st.markdown(f"[Baca selengkapnya]({news['link']})")
+
+
+# PERBAIKAN (skala 1000+ user): dibungkus fragment sendiri, terpisah dari
+# render_top_panel(), supaya berita bisa auto-refresh tiap 15 menit tanpa
+# ikut nge-render ulang panel Top Gainer/Loser (dan sebaliknya). Karena
+# fetch_stock_news() & get_general_market_news() di baliknya sudah
+# di-cache (ttl=900, dibagi semua user), rerun fragment ini tiap 15 menit
+# di ribuan tab sekaligus tetap murah -- hampir selalu baca cache RAM.
+@st.fragment(run_every=REFRESH_SECONDS)
+def render_news_section():
+    st.subheader("📰 Berita")
+    tab_saham, tab_umum = st.tabs(["📈 Saham", "🌐 Umum"])
+
+    with tab_saham:
+        df_scan = ensure_scanned()
+        tickers, portfolio_set = _build_stock_news_queries(df_scan, user_db, identifier)
+        if not tickers:
+            st.info("Belum ada saham untuk dicarikan beritanya (portofolio kosong & scan belum ada).")
+        else:
+            stock_news_queries = {t: f"{t.replace('.JK', '')} saham" for t in tickers}
+            with st.spinner("Mengambil berita saham terbaru..."):
+                news_items = get_all_stock_news(stock_news_queries)
+
+            if not news_items:
+                st.info(
+                    "Belum ada berita terbaru untuk watchlist kamu saat ini, "
+                    "atau Google News sedang tidak bisa diakses."
+                )
+            else:
+                # Prioritas: berita HARI INI yang menyangkut saham portofolio
+                # user ditaruh paling atas, sisanya tetap urut dari yang
+                # paling baru (sort dua tahap, keduanya stabil).
+                today = datetime.now().date()
+
+                def _is_today_portfolio(item):
+                    pub = parse_pub_date(item["pub_date"])
+                    return pub.date() == today and bool(set(item["matched_stocks"]) & portfolio_set)
+
+                news_items.sort(key=lambda item: parse_pub_date(item["pub_date"]), reverse=True)
+                news_items.sort(key=lambda item: 0 if _is_today_portfolio(item) else 1)
+                _render_news_cards(news_items, show_stock_tag=True)
+
+    with tab_umum:
+        with st.spinner("Mengambil berita ekonomi & IHSG terbaru..."):
+            general_news_items = get_general_market_news()
+
+        if not general_news_items:
+            st.info(
+                "Belum ada berita ekonomi/IHSG terbaru saat ini, "
+                "atau Google News sedang tidak bisa diakses."
+            )
+        else:
+            _render_news_cards(general_news_items, show_stock_tag=False)
+
+
+def _tight_subheader(text: str):
+    """st.subheader() yang dibungkus container key "panel_header_tight" --
+    dipakai KHUSUS buat judul yang jadi elemen PERTAMA kelihatan di
+    halaman fitur (Screener/Bandar/Breakout/dst), biar jarak kosong ke
+    header di atasnya dirapetin (lihat CSS .st-key-panel_header_tight).
+    JANGAN dipakai buat subheader yang bukan elemen pertama di halaman
+    (mis. "Info Fundamental" di halaman detail saham, yang emang didahului
+    chart harga) -- itu tetap pakai st.subheader() biasa."""
+    with st.container(key="panel_header_tight"):
+        st.subheader(text)
+
+
+# ============================================================
+# ============================================================
+#  NAVIGASI HALAMAN — dashboard vs halaman fitur terpisah
+# ============================================================
+# PERBAIKAN (mobile-app-ready): dulu semua panel (Scan/Bandar/dst)
+# nongol DI BAWAH tombol menu, di halaman yang sama dengan dashboard.
+# Sekarang beneran dipecah jadi 2 "layar" terpisah:
+#   1) DASHBOARD (active_panel is None): HANYA Top Gainer/Loser + menu
+#      tombol + Berita. Tidak ada tabel/panel fitur di sini.
+#   2) HALAMAN FITUR (active_panel terisi): HANYA konten fitur yang
+#      dipilih + tombol "Kembali ke Dashboard" di atasnya. Dashboard,
+#      menu, dan Berita disembunyikan total selama di halaman ini.
+# Pola 1-layar-1-fungsi ini sengaja dipakai supaya gampang di-porting
+# ke navigasi tab/stack ala app Android/iOS nanti.
+if st.session_state.active_panel is None:
+    # ===================== HALAMAN: DASHBOARD =====================
+    # Menu tombol besar udah pindah ke popover kategori di header
+    # (NAV_CATEGORIES), jadi di sini langsung lompat ke Top Gainer/Loser
+    # + Berita tanpa grid tombol lagi.
+    render_stock_search_bar("dashboard_search_form")
+    render_top_panel()
+    st.divider()
+    render_news_section()
+
+else:
+    # ===================== HALAMAN: FITUR =====================
+    _panel = st.session_state.active_panel
+
+    # ---- SCAN MARKET : tabel penuh, semua saham, semua metrik ----
+    if _panel == "scan":
+        df_scan = ensure_scanned()
+        _tight_subheader("📊 Hasil Scan Penuh")
+        df_display = df_scan.copy()
+        # PERBAIKAN: urutan kolom dipaksa eksplisit di sini -- data hasil
+        # scan disimpan sebagai jsonb di Supabase, dan Postgres TIDAK
+        # menjaga urutan key asli tiap kali disimpan (bisa teracak beda
+        # tiap kali worker nulis ulang), jadi kalau dibiarkan ikut urutan
+        # dari database, kolom "stock" bisa nongol di tengah-tengah tabel.
+        _scan_col_order = [
+            "stock", "price", "change_pct", "week_change_pct", "score",
+            "signal", "trend", "entry", "tp", "sl", "swing", "drop",
+            "bandar", "fake_breakout",
+        ]
+        _cols_present = [c for c in _scan_col_order if c in df_display.columns]
+        _cols_leftover = [c for c in df_display.columns if c not in _cols_present]
+        df_display = df_display[_cols_present + _cols_leftover]
+        df_display["stock"] = df_display["stock"].apply(_display_ticker)
+        render_html_table(df_display)
+
+    # ---- BANDAR DETECTOR : hanya saham dengan aktivitas bandar non-netral ----
+    elif _panel == "bandar":
+        df_scan = ensure_scanned()
+        _tight_subheader("🐋 Deteksi Aktivitas Bandar")
+        bandar_hits = df_scan[df_scan["bandar"] != "NETRAL"]
+        if bandar_hits.empty:
+            st.info("Tidak ada aktivitas bandar signifikan hari ini.")
+        else:
+            for _, r in bandar_hits.iterrows():
+                st.markdown(
+                    f'<div class="card"><b>{_display_ticker(r["stock"])}</b> — {r["bandar"]} '
+                    f'(price: {format_harga(r["price"])}) {signal_badge(r["signal"])}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ---- BREAKOUT SCANNER : saham dengan breakout valid ----
+    elif _panel == "breakout":
+        df_scan = ensure_scanned()
+        _tight_subheader("🚀 Saham Breakout Valid")
+        breakouts = df_scan[df_scan["score"] >= 50]
+        if breakouts.empty:
+            st.info("Belum ada breakout kuat terdeteksi.")
+        else:
+            df_display = breakouts[["stock", "price", "score", "signal", "entry", "tp", "sl"]].copy()
+            df_display["stock"] = df_display["stock"].apply(_display_ticker)
+            render_html_table(df_display)
+
+    # ---- SWING ALERT : saham yang drop >25% dari swing high ----
+    elif _panel == "swing":
+        df_scan = ensure_scanned()
+        _tight_subheader("📉 Swing Drop Alert (>25% dari high)")
+        swing_hits = df_scan[df_scan["swing"] == True]
+        if swing_hits.empty:
+            st.info("Tidak ada saham dengan swing drop signifikan.")
+        else:
+            df_display = swing_hits[["stock", "price", "drop", "trend", "signal"]].copy()
+            df_display["stock"] = df_display["stock"].apply(_display_ticker)
+            render_html_table(df_display)
+
+    # ---- FAKE BREAKOUT : breakout yang baru saja gagal ----
+    elif _panel == "fake":
+        df_scan = ensure_scanned()
+        _tight_subheader("⚠️ Fake Breakout Warning")
+        fake_hits = df_scan[df_scan["fake_breakout"] == True]
+        if fake_hits.empty:
+            st.info("Tidak ada fake breakout terdeteksi saat ini.")
+        else:
+            df_display = fake_hits[["stock", "price", "trend", "signal"]].copy()
+            df_display["stock"] = df_display["stock"].apply(_display_ticker)
+            render_html_table(df_display)
+
+    # ---- SEND BEST TO TELEGRAM : sekarang halaman sendiri dengan tombol
+    # konfirmasi terpisah, biar gak kekirim gak sengaja. ----
+    elif _panel == "telegram":
+        _tight_subheader("📲 Kirim Best Pick ke Telegram")
+        df_scan = ensure_scanned()
+        if df_scan.empty:
+            st.warning("Belum ada data untuk dikirim.")
+        else:
+            best = df_scan.iloc[0]
+            st.markdown(
+                f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
+                f'{signal_badge(best["signal"])} @ {format_harga(best["price"])}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("📲 Kirim Sekarang", key="send_telegram_confirm_btn"):
+                msg = (
+                    f"BEST PICK: {_display_ticker(best['stock'])}\n"
+                    f"Signal: {best['signal']}\n"
+                    f"Price: {format_harga(best['price'])}\n"
+                    f"Entry: {best['entry']} | TP: {best['tp']} | SL: {best['sl']}"
+                )
+                ok = send_telegram(msg)
+                if ok:
+                    st.success("Terkirim ke Telegram ✅")
+                else:
+                    st.error("Gagal kirim ke Telegram — coba lagi sebentar lagi.")
+
+    # ---- BROKER SUMMARY : kode broker + volume beli/jual per saham,
+    # khusus data EOD (update setelah bursa tutup). ----
+    elif _panel == "broker":
+        _tight_subheader("🏦 Broker Summary (Data EOD)")
+
+        _goapi_configured = _broker_data_available()
+
+        if not _goapi_configured:
+            # ---- LOCKED / COMING SOON ----
+            # Fitur ini butuh langganan data premium. Ditahan dulu sampai
+            # ada user berlangganan Pro di app ini, biar biayanya
+            # ke-cover -- bukan nombok duluan. Begitu API key diisi di
+            # Secrets, panel ini otomatis berubah jadi fungsional tanpa
+            # perlu ubah kode apa pun lagi.
+            st.markdown(
+                """
+                <div class="card" style="text-align:center; padding: 40px 24px;">
+                    <div style="font-size:42px; margin-bottom:8px;">🔒</div>
+                    <div style="font-size:20px; font-weight:800; color:#ffffff; margin-bottom:8px;">
+                        Broker Summary — Segera Hadir
+                    </div>
+                    <div style="font-size:14px; color:#a9a7c4; max-width:520px; margin:0 auto 18px auto; line-height:1.6;">
+                        Fitur ini akan menampilkan kode broker, top broker pembeli & penjual,
+                        serta net akumulasi/distribusi untuk tiap saham (data resmi EOD, update
+                        setelah bursa tutup). Sedang dalam proses aktivasi langganan data —
+                        akan dibuka begitu tersedia.
+                    </div>
+                    <span class="badge badge-neutral">🔒 PREMIUM · SEGERA HADIR</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.info(
+                "Sementara menunggu, coba fitur **🐋 BANDAR DETECTOR** — deteksi indikasi "
+                "aktivitas bandar (akumulasi/markup/distribusi) berbasis pola volume & harga, "
+                "sudah aktif dan gratis."
+            )
+        else:
+            _render_broker_summary_panel()
+
+    # ---- KOMUNITAS : community feed (post, reaction, laporan spam) + bell
+    # notif sudah dipasang di header. Panel ini hanya untuk user aktif/owner
+    # (sudah dijamin karena st.stop() di atas kalau bukan owner/active). ----
+    elif _panel == "community":
+        _tight_subheader("💬 Komunitas SahamPro")
+        if not supabase_client:
+            st.warning(
+                "Community Feed belum aktif — SUPABASE_URL / SUPABASE_SERVICE_KEY "
+                "belum diisi di Secrets. Isi dulu supaya fitur ini jalan."
+            )
+        else:
+            render_community_feed(supabase_client, identifier, display_name)
+
+    # ---- PRIVASI AKUN : dibuka dari dropdown nama profil di header,
+    # bukan dari menu utama. Baru berisi info dasar akun -- kontrol
+    # privasi lebih detail (export data, hapus akun, dst) bisa
+    # ditambahkan di sini nanti tanpa ubah struktur navigasi. ----
+    elif _panel == "privacy":
+        _tight_subheader("🔒 Privasi Akun")
+        st.markdown(
+            f'<div class="card">'
+            f'<b>Username:</b> {display_name}<br>'
+            f'<b>Status akun:</b> {"Owner" if status == "owner" else ("Aktif berlangganan" if status == "active" else "Belum berlangganan")}<br>'
+            f'<b>Sesi login:</b> tersimpan aman di cookie terenkripsi di perangkat ini, '
+            f'berlaku {SESSION_DURATION_DAYS} hari sejak login terakhir.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.info(
+            "Kontrol privasi lain (mis. unduh/hapus data akun) belum tersedia di "
+            "halaman ini — akan ditambahkan menyusul. Untuk sekarang, gunakan "
+            "tombol Logout di menu profil kalau ingin mengakhiri sesi login di "
+            "perangkat ini."
+        )
+
+
+# ================== STRIPE WEBHOOK ==================
+# CATATAN PENTING: Streamlit TIDAK BISA menerima HTTP webhook secara langsung
+# (tidak ada route/endpoint di app Streamlit). Fungsi di bawah ini hanya
+# contoh LOGIKA-nya saja. Untuk implementasi nyata, kamu perlu:
+#   1. Server terpisah (Flask/FastAPI) yang punya endpoint /stripe-webhook
+#   2. Server itu memverifikasi signature webhook dari Stripe
+#   3. Server itu menulis ke USER_DB_FILE (atau database asli seperti
+#      Postgres/Supabase) — bukan ke dict Python yang cuma hidup di memory
+#   4. App Streamlit ini membaca dari storage yang sama (sudah dilakukan
+#      lewat load_user_db() di atas)
+#
+# PERBAIKAN: karena sistem login sekarang berbasis username (bukan email),
+# saat bikin Stripe Checkout Session kamu WAJIB isi `client_reference_id`
+# dengan username user yang sedang login (format "user:<username>", sama
+# seperti key yang dipakai user_db), supaya webhook ini tahu akun mana yang
+# harus diaktifkan setelah bayar. Contoh saat bikin checkout session:
+#   stripe.checkout.Session.create(
+#       ...,
+#       client_reference_id=identifier,
+#       # WAJIB juga diisi metadata "plan" sesuai tombol paket yang diklik
+#       # user, salah satu dari: "bulanan", "3_bulanan", "tahunan" -- ini
+#       # yang dipakai activate_subscription() buat hitung tanggal berakhir.
+#       metadata={"plan": "bulanan"},
+#   )
+def stripe_webhook(event):
+    user_db = load_user_db()
+    if event["type"] == "checkout.session.completed":
+        obj = event["data"]["object"]
+        user_key = obj.get("client_reference_id")
+        plan = (obj.get("metadata") or {}).get("plan", "bulanan")
+        if user_key:
+            activate_subscription(user_db, user_key, plan)
+    elif event["type"] == "invoice.payment_failed":
+        user_key = event["data"]["object"].get("client_reference_id")
+        if user_key:
+            existing = user_db.get(user_key, {})
+            existing["status"] = "inactive"
+            user_db[user_key] = existing
+            save_user_db(user_db)
