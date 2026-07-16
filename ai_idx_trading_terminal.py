@@ -775,27 +775,36 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.5px;
         color: #1a0f00;
-        line-height: 21px;
+        line-height: 19px;
+        margin-top: -2px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    /* caption "🕒 Update terakhir: ..." -- dulu berdiri sendiri di
-       bawah search bar (class .update-strip), sekarang ditumpuk di
-       bawah nama app di header, jadi lebih kecil & rapat. line-height
-       dikasih ruang cukup (bukan dipepetin ke 0) karena glyph emoji jam
-       butuh sedikit ruang vertikal ekstra, kalau terlalu mepet malah
-       numpuk sama baris nama app di atasnya. */
+    /* caption "🕒 Update harga terakhir: ..." -- sekarang 2 baris:
+       baris 1 (jam, TEBAL) + baris 2 (hari & tanggal, TIPIS/pudar).
+       line-height dikasih ruang cukup (bukan dipepetin ke 0) karena
+       glyph emoji jam butuh sedikit ruang vertikal ekstra, kalau
+       terlalu mepet malah numpuk sama baris nama app di atasnya. */
     .app_update_caption {
-        font-size: 11px;
-        font-weight: 600;
-        color: #3a2200;
-        opacity: 0.9;
-        line-height: 16px;
-        margin-top: 1px;
+        margin-top: 0px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+    .app_update_line1 {
+        font-size: 11px;
+        font-weight: 700;
+        color: #1a0f00;
+        opacity: 0.95;
+        line-height: 14px;
+    }
+    .app_update_line2 {
+        font-size: 10px;
+        font-weight: 400;
+        color: #3a2200;
+        opacity: 0.75;
+        line-height: 13px;
     }
     .app_update_caption b { color: #1a0f00; }
     /* tombol ikon (Portofolio) di baris 1 -- font emoji dibesarin dikit
@@ -1447,11 +1456,33 @@ PLAN_LABELS = {
 }
 
 _BULAN_ID = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+_HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
 
 def format_tanggal_id(dt):
     """Format datetime jadi '12 Jul 2026' (tanpa perlu setting locale OS)."""
     return f"{dt.day} {_BULAN_ID[dt.month - 1]} {dt.year}"
+
+
+def format_hari_tanggal_id(dt):
+    """Format datetime jadi 'Kamis, 16 Jul 2026' (nama hari + tanggal,
+    tanpa perlu setting locale OS -- dt.weekday() Senin=0..Minggu=6)."""
+    return f"{_HARI_ID[dt.weekday()]}, {format_tanggal_id(dt)}"
+
+
+def format_harga(value):
+    """Format harga saham jadi angka bulat pakai titik sebagai pemisah
+    ribuan gaya Indonesia (contoh: 1250.0 -> '1.250'). Kalau value kosong
+    /None/NaN, balikin '–' biar aman dipasang di HTML tabel/list."""
+    try:
+        if value is None:
+            return "–"
+        f = float(value)
+        if f != f:  # NaN check tanpa import math
+            return "–"
+        return f"{f:,.0f}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "–"
 
 
 def activate_subscription(user_db, identifier, plan):
@@ -1966,10 +1997,13 @@ def render_header_brand_block():
     updated_dt = st.session_state.get("last_updated")
     caption_html = ""
     if updated_dt is not None:
-        last_upd_str = updated_dt.strftime("%H:%M, %d %b %Y")
+        last_upd_time = updated_dt.strftime("%H:%M")
+        last_upd_hari_tanggal = format_hari_tanggal_id(updated_dt)
         caption_html = (
-            f'<div class="app_update_caption">🕒 Update terakhir: '
-            f'<b>{last_upd_str}</b> WIB</div>'
+            f'<div class="app_update_caption">'
+            f'<div class="app_update_line1">🕒 Update harga terakhir: {last_upd_time} WIB</div>'
+            f'<div class="app_update_line2">{last_upd_hari_tanggal}</div>'
+            f'</div>'
         )
     st.markdown(
         f'<div class="app_brand_name">Syariah Signal</div>{caption_html}',
@@ -2634,7 +2668,7 @@ def render_portfolio_page(user_db, identifier, display_name):
             match = df_scan[df_scan["stock"] == ticker_jk] if df_scan is not None else None
             if match is not None and not match.empty:
                 r = match.iloc[0]
-                price = f"{r['price']:,.0f}"
+                price = format_harga(r['price'])
                 score_txt = score_badge(r["score"])
                 daily = r["change_pct"]
                 weekly = r.get("week_change_pct", None)
@@ -2655,7 +2689,7 @@ def render_portfolio_page(user_db, identifier, display_name):
             quote = get_quick_quote_cached(ticker_jk)
             row_cls = "portfolio-row-nonsyariah"
             if quote:
-                price = f"{quote['price']:,.0f}"
+                price = format_harga(quote['price'])
                 daily = quote["change_pct"]
                 daily_cls = "gain-up" if daily >= 0 else "gain-down"
             else:
@@ -3018,7 +3052,7 @@ def render_stock_detail_page(ticker_raw):
             _chg_html = f' <span class="{_chg_cls}">({_chg:+.2f}%)</span>'
         else:
             _chg_html = ""
-        sub_line = f"Harga terakhir: {scan_row['price']}{_chg_html}"
+        sub_line = f"Harga terakhir: {format_harga(scan_row['price'])}{_chg_html}"
     badge_html = signal_badge(scan_row["signal"]) if scan_row is not None else ""
     st.markdown(
         f"""
@@ -3427,7 +3461,7 @@ def render_top_panel():
                 (lambda cls, label: (
                     f'<div class="scroll-item">'
                     f'<a class="stock-link" href="?stock={_display_ticker(r["stock"])}" target="_self">'
-                    f'{_display_ticker(r["stock"])}</a> — {r["price"]} '
+                    f'{_display_ticker(r["stock"])}</a> — {format_harga(r["price"])} '
                     f'<span class="{"gain-up" if r["change_pct"] >= 0 else "gain-down"}">'
                     f'({r["change_pct"]:+.2f}%)</span> '
                     f'<span class="gl-tag {cls}">{label}</span></div>'
@@ -3614,7 +3648,7 @@ else:
             best = df_scan.iloc[0]
             st.markdown(
                 f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
-                f'{signal_badge(best["signal"])} @ {best["price"]}</div>',
+                f'{signal_badge(best["signal"])} @ {format_harga(best["price"])}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -3629,7 +3663,7 @@ else:
             for _, r in bandar_hits.iterrows():
                 st.markdown(
                     f'<div class="card"><b>{_display_ticker(r["stock"])}</b> — {r["bandar"]} '
-                    f'(price: {r["price"]}) {signal_badge(r["signal"])}</div>',
+                    f'(price: {format_harga(r["price"])}) {signal_badge(r["signal"])}</div>',
                     unsafe_allow_html=True,
                 )
 
@@ -3680,14 +3714,14 @@ else:
             best = df_scan.iloc[0]
             st.markdown(
                 f'<div class="card"><b>BEST PICK:</b> {_display_ticker(best["stock"])} — '
-                f'{signal_badge(best["signal"])} @ {best["price"]}</div>',
+                f'{signal_badge(best["signal"])} @ {format_harga(best["price"])}</div>',
                 unsafe_allow_html=True,
             )
             if st.button("📲 Kirim Sekarang", key="send_telegram_confirm_btn"):
                 msg = (
                     f"BEST PICK: {_display_ticker(best['stock'])}\n"
                     f"Signal: {best['signal']}\n"
-                    f"Price: {best['price']}\n"
+                    f"Price: {format_harga(best['price'])}\n"
                     f"Entry: {best['entry']} | TP: {best['tp']} | SL: {best['sl']}"
                 )
                 ok = send_telegram(msg)
