@@ -597,6 +597,15 @@ st.markdown("""
     }
 
     /* ---------------------------------------------------------
+       ICON FONT — Material Symbols Outlined (Google Fonts). Dipakai
+       supaya semua icon header (home, wallet, notif, avatar, kategori
+       nav) jadi vector minimalis yang konsisten, bukan emoji lawas
+       (yang di beberapa browser/HP suka fallback jadi kotak hitam
+       "tofu" kalau emoji-nya gak dikenali font sistem). ----------
+    --------------------------------------------------------- */
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..600,0,0&display=swap');
+
+    /* ---------------------------------------------------------
        TOP HEADER — logo teks kecil, rata kiri (bukan ikon gede
        di tengah lagi -- kepanjangan/berat kalau di HP)
     --------------------------------------------------------- */
@@ -744,40 +753,53 @@ st.markdown("""
     .st-key-header_status_bar div[data-testid="stColumn"] {
         min-width: 0 !important;
     }
-    /* nama aplikasi "Saham Syariah" -- ambil sisa ruang kolom pertama,
-       teks gelap biar kontras di atas latar oranye */
+    /* nama aplikasi -- ambil sisa ruang kolom pertama, teks gelap biar
+       kontras di atas latar oranye.
+       PERBAIKAN: dibesarkan (21px -> 30px, ~43% lebih besar) + uppercase
+       biar lebih menonjol, tapi line-height sengaja ditahan di 34px
+       (sama kayak tinggi avatar/tombol row 1) supaya baris header TIDAK
+       ikut melebar/lebih tinggi -- teks tetap center secara vertikal
+       dalam ruang yang sama. */
     .app_brand_name {
         font-weight: 800;
-        font-size: 21px;
+        font-size: 30px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
         color: #1a0f00;
         line-height: 34px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    /* tombol ikon polos (portofolio, notif) di baris 1 -- transparan,
-       cuma ikon gelap, tanpa kotak/border supaya ringkas */
+    /* tombol ikon polos (portofolio, avatar) di baris 1 -- transparan,
+       cuma ikon gelap, tanpa kotak/border, senada sama baris nav di
+       bawahnya (Scanner/Trading/Bandar/Alert). Font Material Symbols
+       dipasang di sini juga supaya ligature ("home", "person", dst)
+       ke-render sebagai icon vector, bukan teks polos. */
     .st-key-header_status_bar div.stButton > button {
-        background: #1a0f00 !important;
+        background: transparent !important;
         border: none !important;
         border-radius: 8px !important;
         box-shadow: none !important;
-        color: #ff8c00 !important;
-        font-size: 16px !important;
+        color: #1a0f00 !important;
+        font-family: 'Material Symbols Outlined' !important;
+        font-size: 21px !important;
         padding: 0.3em 0.5em !important;
         min-width: 0 !important;
     }
-    /* avatar bulat (trigger popover profil) berisi inisial nama */
+    /* avatar (trigger popover profil) -- icon "person" minimalis,
+       transparan, tanpa lingkaran/kotak solid seperti sebelumnya */
     .st-key-profile_avatar_wrap div[data-testid="stPopover"] button {
-        background: #1a0f00 !important;
-        color: #ff8c00 !important;
-        font-weight: 800 !important;
-        font-size: 13px !important;
-        border-radius: 50% !important;
-        width: 34px !important;
+        background: transparent !important;
+        color: #1a0f00 !important;
+        font-family: 'Material Symbols Outlined' !important;
+        font-weight: 400 !important;
+        font-size: 22px !important;
+        border-radius: 8px !important;
+        width: auto !important;
         height: 34px !important;
-        min-width: 34px !important;
-        padding: 0 !important;
+        min-width: 0 !important;
+        padding: 0 0.4em !important;
         border: none !important;
         box-shadow: none !important;
         display: flex !important;
@@ -801,8 +823,9 @@ st.markdown("""
     .st-key-nav_icon_row div[data-testid="stPopover"] button {
         background: transparent !important;
         color: #1a0f00 !important;
-        font-weight: 700 !important;
-        font-size: 17px !important;
+        font-family: 'Material Symbols Outlined' !important;
+        font-weight: 400 !important;
+        font-size: 21px !important;
         border-radius: 8px !important;
         border: none !important;
         box-shadow: none !important;
@@ -818,19 +841,22 @@ st.markdown("""
     }
     /* kolom pertama (Home) -- ikon, warna & tinggi seragam sama tombol lain */
     .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] > div:first-child div.stButton > button {
-        font-size: 17px !important;
+        font-size: 21px !important;
         background: transparent !important;
     }
-    /* label kecil & tipis di bawah tiap ikon nav (gaya bottom-nav-bar
-       minimalis: ikon di atas, teks singkat tipis di bawahnya) */
+    /* label kecil di bawah tiap ikon nav (gaya bottom-nav-bar minimalis:
+       ikon di atas, teks singkat di bawahnya).
+       PERBAIKAN: sebelumnya font-weight 300 + opacity 0.72 kebaca tipis
+       banget -- sekarang ditebalkan (700) & opacity full biar jelas
+       kebaca tanpa mengubah ukuran/tinggi baris. */
     .nav-icon-label {
         display: block;
         text-align: center;
-        font-size: 9px;
-        font-weight: 300;
+        font-size: 9.5px;
+        font-weight: 700;
         letter-spacing: 0.2px;
         color: #1a0f00;
-        opacity: 0.72;
+        opacity: 1;
         line-height: 1;
         margin-top: 1px;
         white-space: nowrap;
@@ -1628,19 +1654,19 @@ if "active_panel" not in st.session_state:
 # dan ditaruh sebagai popover di baris ke-3 header, biar nggak makan
 # tempat vertikal di HP (keluhan awal: "ribet, makan tempat").
 NAV_CATEGORIES = [
-    ("📈", "Scanner", [
+    ("search", "Scanner", [
         ("scan", "🔍 Scan Market"),
         ("breakout", "🚀 Breakout Scanner"),
         ("fake", "⚠️ Fake Breakout"),
     ]),
-    ("📊", "Trading", [
+    ("trending_up", "Trading", [
         ("swing", "📉 Swing Alert"),
     ]),
-    ("🐋", "Bandar", [
+    ("visibility", "Bandar", [
         ("bandar", "🐋 Bandar Detector"),
         ("broker", "🏦 Broker Summary"),
     ]),
-    ("🤖", "Otomasi", [
+    ("notifications_active", "Alert", [
         ("telegram", "📲 Send Best to TG"),
     ]),
 ]
@@ -1667,7 +1693,7 @@ with st.container(key="header_status_bar"):
 
     with col_portfolio:
         if is_subscriber:
-            if st.button("💼", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
+            if st.button("account_balance_wallet", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
                 st.session_state["show_portfolio"] = True
                 st.rerun()
 
@@ -1675,10 +1701,13 @@ with st.container(key="header_status_bar"):
         if is_subscriber and supabase_client:
             render_notification_bell(supabase_client, user_id=identifier)
 
-    # ---- Avatar bulat (inisial nama) = trigger dropdown (popover) berisi
+    # ---- Avatar (icon orang minimalis) = trigger dropdown (popover) berisi
     # status langganan, Privasi Akun & Logout. Status (owner/aktif/belum)
-    # sekarang cuma muncul DI DALAM popover, bukan di avatar-nya sendiri. ----
-    _initials = _get_initials(display_name)
+    # sekarang cuma muncul DI DALAM popover, bukan di avatar-nya sendiri.
+    # PERBAIKAN: sebelumnya avatar pakai inisial nama dalam lingkaran hitam
+    # solid (kesannya "kotak/box" & beda gaya sama icon lain) -- sekarang
+    # diganti icon "person" minimalis, transparan, senada sama icon nav
+    # lainnya (Scanner/Trading/Bandar/Alert). ----
 
     # PERBAIKAN: st.popover bawaan Streamlit TIDAK otomatis nutup diri
     # sendiri kalau tombol DI DALAMNYA diklik lalu trigger st.rerun() --
@@ -1693,7 +1722,7 @@ with st.container(key="header_status_bar"):
 
     with col_avatar:
         with st.container(key="profile_avatar_wrap"):
-            with st.popover(_initials, use_container_width=True, key=_popover_key):
+            with st.popover("person", use_container_width=True, key=_popover_key):
                 st.markdown(f"**{display_name}**")
                 if status == "owner":
                     st.success("👑 Owner access granted")
@@ -1756,7 +1785,7 @@ with st.container(key="header_status_bar"):
     with st.container(key="nav_icon_row"):
         icon_cols = st.columns(n_icons)
         with icon_cols[0]:
-            if st.button("🏠", key="home_btn", use_container_width=True, help="Home"):
+            if st.button("home", key="home_btn", use_container_width=True, help="Home"):
                 _go_to_dashboard()
             st.markdown('<span class="nav-icon-label">Home</span>', unsafe_allow_html=True)
         for i, (cat_icon, cat_name, cat_items) in enumerate(NAV_CATEGORIES):
