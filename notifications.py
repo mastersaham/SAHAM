@@ -141,9 +141,12 @@ def render_notification_bell(supabase, user_id: str, limit: int = 20):
             box-shadow: none !important;
             color: #1a0f00 !important;
             font-size: 20px !important;
-            height: 42px !important;
-            min-height: 42px !important;
+            height: 34px !important;
+            min-height: 34px !important;
             padding: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
         }
         .notif-badge-dot {
             position: absolute;

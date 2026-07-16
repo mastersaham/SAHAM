@@ -753,7 +753,7 @@ st.markdown("""
        dalam ruang yang sama. */
     .app_brand_name {
         font-weight: 800;
-        font-size: 30px;
+        font-size: 20px;
         text-transform: uppercase;
         letter-spacing: 0.5px;
         color: #1a0f00;
@@ -761,6 +761,15 @@ st.markdown("""
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+    /* tombol ikon (Portofolio) di baris 1 -- font emoji dibesarin dikit
+       biar sebanding sama ikon bell/avatar di sebelahnya, tetep transparan
+       tanpa kotak, senada sama .st-key-header_status_bar div.stButton */
+    .st-key-header_status_bar div[data-testid="column"]:nth-child(2) div.stButton > button,
+    .st-key-header_status_bar div[data-testid="stColumn"]:nth-child(2) div.stButton > button {
+        font-size: 18px !important;
+        padding: 0 0.4em !important;
+        height: 34px !important;
     }
     /* tombol teks (Portofolio) di baris 1 -- transparan, teks kapital
        kecil-bold, tanpa kotak/border, senada sama baris nav di bawahnya
@@ -812,6 +821,27 @@ st.markdown("""
         padding: 6px 10px 6px 10px;
         margin: 4px -12px -4px -12px;
         border-top: 1px solid rgba(26,15,0,0.18);
+    }
+    /* PERBAIKAN: baris nav sebelumnya gak dipaksa lebar penuh, jadi
+       5 tombolnya (HOME/SCANNER/TRADING/BANDAR/ALERT) nempel ke kiri
+       sebagai satu grup & nyisain ruang kosong di kanan (Alert kelihatan
+       "geser kiri"). Sekarang barisnya dipaksa 100% lebar container,
+       dan tiap kolom dipaksa rata (flex: 1 1 0) biar 5 tombol itu
+       bener-bener bagi rata dari kiri sampe kanan. */
+    .st-key-nav_icon_row div[data-testid="stHorizontalBlock"] {
+        width: 100% !important;
+    }
+    .st-key-nav_icon_row div[data-testid="column"],
+    .st-key-nav_icon_row div[data-testid="stColumn"] {
+        flex: 1 1 0 !important;
+    }
+    /* PERBAIKAN: sebelumnya cuma ada gap 6px antar tombol, gak ada
+       pemisah visual -- kesannya nempel/mepet jadi satu strip. Sekarang
+       ditambah garis tipis vertikal di kanan tiap tombol (kecuali yang
+       paling kanan) biar tiap kategori kelihatan sebagai sel terpisah. */
+    .st-key-nav_icon_row div[data-testid="column"]:not(:last-child),
+    .st-key-nav_icon_row div[data-testid="stColumn"]:not(:last-child) {
+        border-right: 1px solid rgba(26,15,0,0.18);
     }
     .st-key-nav_icon_row div.stButton > button,
     .st-key-nav_icon_row div[data-testid="stPopover"] button {
@@ -871,8 +901,10 @@ st.markdown("""
         opacity: 0.85;
     }
 
-    /* search bar cari saham -- input + tombol lekat jadi 1 pill putih,
-       bukan 2 elemen terpisah (permintaan: "jangan 2 baris/2 tombol") */
+    /* search bar cari saham -- pill minimalis, outline tipis, ikon nyatu
+       di dalam bar (request: "kaya kolom search modern, ikon di dalam
+       kolom", yang lama kesan jadul -- kotak putih solid + tombol
+       kaca pembesar nempel dipisah garis) */
     /* jarak ke elemen di atasnya (nav icon row) kejauhan -- rapetin */
     div[class*="search_form_wrap"] {
         margin-top: -14px !important;
@@ -885,15 +917,17 @@ st.markdown("""
     /* PERBAIKAN: bawaan Streamlit, kolom form otomatis TURUN JADI 2 BARIS
        di layar sempit (HP). Dipaksa tetap row 1 baris di semua ukuran
        layar (HP maupun desktop), input fleksibel & tombol kaca pembesar
-       lebar tetap kecil. */
+       lebar tetap kecil. Bar-nya sekarang pill penuh (border-radius 999px)
+       dengan outline tipis & isi transparan-gelap, bukan kotak putih
+       solid -- biar nyatu sama tema gelap, bukan nongol terang. */
     div[class*="search_form_wrap"] div[data-testid="stHorizontalBlock"] {
         gap: 0 !important;
         flex-direction: row !important;
         flex-wrap: nowrap !important;
-        background: #ffffff;
-        border-radius: 10px;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.35);
+        border-radius: 999px;
         overflow: hidden;
-        box-shadow: 0 4px 14px -8px rgba(0,0,0,0.4);
     }
     div[class*="search_form_wrap"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
         width: auto !important;
@@ -905,22 +939,26 @@ st.markdown("""
         width: 46px !important;
     }
     div[class*="search_form_wrap"] div[data-testid="stTextInput"] input {
-        background: #ffffff !important;
-        color: #1a0f00 !important;
+        background: transparent !important;
+        color: #f3f2ef !important;
         border: none !important;
         border-radius: 0 !important;
         box-shadow: none !important;
         height: 42px !important;
+        padding-left: 18px !important;
     }
     div[class*="search_form_wrap"] div[data-testid="stTextInput"] input::placeholder {
-        color: #8a8a8a !important;
+        color: rgba(243,242,239,0.5) !important;
     }
+    /* PERBAIKAN: tombol kaca pembesar sebelumnya punya kotak putih +
+       border-left divider sendiri (kesan "2 elemen ditempel"). Sekarang
+       transparan penuh, nyatu jadi bagian dari pill yang sama -- cuma
+       ikonnya doang yang nongol di ujung kanan, tanpa kotak/garis. */
     div[class*="search_form_wrap"] div[data-testid="stForm"] div.stButton > button,
     div[class*="search_form_wrap"] button[kind="formSubmit"] {
-        background: #ffffff !important;
-        color: #1a0f00 !important;
+        background: transparent !important;
+        color: #f3f2ef !important;
         border: none !important;
-        border-left: 1px solid #ececec !important;
         border-radius: 0 !important;
         box-shadow: none !important;
         height: 42px !important;
@@ -1668,14 +1706,14 @@ def _get_initials(name):
 
 with st.container(key="header_status_bar"):
     # ---- baris 1: nama app (sisa ruang) + portofolio + notif + avatar ----
-    col_brand, col_portfolio, col_notif, col_avatar = st.columns([3.4, 0.55, 0.55, 0.7])
+    col_brand, col_portfolio, col_notif, col_avatar = st.columns([2.6, 0.5, 0.55, 0.7])
 
     with col_brand:
         st.markdown('<div class="app_brand_name">Syariah Signal</div>', unsafe_allow_html=True)
 
     with col_portfolio:
         if is_subscriber:
-            if st.button("PORTOFOLIO", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
+            if st.button("💼", key="portfolio_btn", use_container_width=True, help="Portofolio Saya"):
                 st.session_state["show_portfolio"] = True
                 st.rerun()
 
@@ -2237,7 +2275,7 @@ def render_stock_search_bar(form_key):
             with _search_col1:
                 _query = st.text_input(
                     "Cari saham",
-                    placeholder="Cari kode saham, mis. BBCA",
+                    placeholder="Cari kode saham, mis. ICBP",
                     label_visibility="collapsed",
                     key=f"{form_key}_input",
                 )
@@ -2353,7 +2391,7 @@ def render_portfolio_page(user_db, identifier, display_name):
         col_add_input, col_add_btn = st.columns([4, 1])
         with col_add_input:
             new_code = st.text_input(
-                "Tambah kode saham", placeholder="Contoh: BBCA", label_visibility="collapsed"
+                "Tambah kode saham", placeholder="Contoh: ICBP", label_visibility="collapsed"
             )
         with col_add_btn:
             submit_add = st.form_submit_button("➕ Tambah", use_container_width=True)
