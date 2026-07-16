@@ -28,9 +28,10 @@ st.set_page_config(
 )
 
 # Dipindah ke sini (sebelumnya ada di dekat REFRESH_SECONDS lama, jauh di
-# bawah) karena sekarang caption "Update terakhir" dirender di header
-# lewat fragment sendiri (render_header_update_caption), dan fragment itu
-# butuh REFRESH_SECONDS sudah didefinisikan duluan sebelum header dipanggil.
+# bawah) karena sekarang blok nama app + caption "Update terakhir" di
+# header dirender lewat fragment sendiri (render_header_brand_block), dan
+# fragment itu butuh REFRESH_SECONDS sudah didefinisikan duluan sebelum
+# header dipanggil.
 REFRESH_SECONDS = 900
 
 # ============================================================
@@ -534,7 +535,7 @@ st.markdown("""
        kecilkan supaya halaman pembuka nggak keliatan "ngambang". */
     div[data-testid="stAppViewBlockContainer"],
     .block-container {
-        padding-top: 6rem !important; /* ruang buat header (2 baris + label nav) yang sekarang fixed */
+        padding-top: 6.6rem !important; /* ruang buat header (2 baris nav + caption update di bawah nama app) yang sekarang fixed */
         padding-bottom: 3.6rem !important; /* ruang buat bottom bar Komunitas yang fixed (sekarang lebih tipis) */
     }
 
@@ -764,54 +765,34 @@ st.markdown("""
         min-width: 0 !important;
     }
     /* nama aplikasi + caption "Update terakhir" -- ditumpuk vertikal
-       dalam SATU ruang yang sama (bukan nambah ruang baru): kolom
-       pertama header (nth-child(1)) rapatkan jaraknya, karena secara
-       default tiap elemen Streamlit (nama app & caption fragment) punya
-       gap vertikal bawaan yang bikin dua baris ini kelihatan renggang. */
-    .st-key-header_status_bar div[data-testid="column"]:nth-child(1),
-    .st-key-header_status_bar div[data-testid="stColumn"]:nth-child(1) {
-        display: flex !important;
-        flex-direction: column !important;
-        justify-content: center !important;
-        gap: 0 !important;
-    }
-    .st-key-header_status_bar div[data-testid="column"]:nth-child(1) div[data-testid="stVerticalBlock"],
-    .st-key-header_status_bar div[data-testid="stColumn"]:nth-child(1) div[data-testid="stVerticalBlock"] {
-        gap: 0 !important;
-    }
-    .st-key-header_status_bar div[data-testid="column"]:nth-child(1) div[data-testid="stMarkdown"],
-    .st-key-header_status_bar div[data-testid="stColumn"]:nth-child(1) div[data-testid="stMarkdown"] {
-        margin: 0 !important;
-        padding: 0 !important;
-        line-height: 1 !important;
-    }
-    /* nama aplikasi -- ambil sisa ruang kolom pertama, teks gelap biar
-       kontras di atas latar oranye.
-       PERBAIKAN: dibesarkan (21px -> 30px, ~43% lebih besar) + uppercase
-       biar lebih menonjol. line-height dulu ditahan 34px pas nama app
-       sendirian di baris ini -- sekarang ada caption update di bawahnya,
-       jadi line-height dikecilkan biar dua baris pas dalam tinggi row 1
-       yang sama (bukan melebar ke bawah). */
+       dalam SATU ruang yang sama (bukan nambah ruang baru). Dua-duanya
+       sekarang 1 blok HTML (2 <div> berurutan) dalam SATU st.markdown,
+       jadi bertumpuk normal sebagai block element, tanpa perlu hack
+       flex/gap di kolom Streamlit-nya. */
     .app_brand_name {
         font-weight: 800;
-        font-size: 20px;
+        font-size: 19px;
         text-transform: uppercase;
         letter-spacing: 0.5px;
         color: #1a0f00;
-        line-height: 22px;
+        line-height: 21px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
     /* caption "🕒 Update terakhir: ..." -- dulu berdiri sendiri di
        bawah search bar (class .update-strip), sekarang ditumpuk di
-       bawah nama app di header, jadi lebih kecil & rapat. */
+       bawah nama app di header, jadi lebih kecil & rapat. line-height
+       dikasih ruang cukup (bukan dipepetin ke 0) karena glyph emoji jam
+       butuh sedikit ruang vertikal ekstra, kalau terlalu mepet malah
+       numpuk sama baris nama app di atasnya. */
     .app_update_caption {
-        font-size: 10.5px;
+        font-size: 11px;
         font-weight: 600;
         color: #3a2200;
-        opacity: 0.85;
-        line-height: 13px;
+        opacity: 0.9;
+        line-height: 16px;
+        margin-top: 1px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -1878,25 +1859,32 @@ def _get_initials(name):
     return (parts[0][0] + parts[-1][0]).upper()
 
 @st.fragment(run_every=REFRESH_SECONDS)
-def render_header_update_caption():
-    """Caption kecil "🕒 Update terakhir: ..." yang ditumpuk di bawah nama
-    app di header (dulu berdiri sendiri sebagai .update-strip di bawah
-    search bar Dashboard). Dipisah jadi fragment sendiri (bukan cuma
-    st.markdown biasa) supaya jamnya ikut auto-refresh tiap REFRESH_SECONDS
-    sama seperti render_top_panel(), walau posisinya sekarang di header
-    yang dirender duluan/sekali di awal script.
-    Label SENGAJA selalu "Update terakhir" (tidak lagi berubah jadi "Data
-    terakhir saat bursa tutup" walau di luar jam bursa) -- ikon jam 🕒
-    dipertahankan sesuai versi lama. Kalau data belum pernah ke-scan sama
-    sekali, caption ini tidak nampilkan apa-apa (biar gak dobel sama info
-    "sedang menyiapkan data" yang sudah ada di body halaman Dashboard)."""
+def render_header_brand_block():
+    """Blok nama app "Syariah Signal" + caption "🕒 Update terakhir: ..."
+    di header, DIGABUNG jadi satu string HTML & satu st.markdown() call
+    (bukan dua elemen terpisah) -- supaya dua baris ini dijamin bertumpuk
+    rapi sebagai anak langsung dalam satu wrapper yang sama, tanpa
+    tergantung CSS flex/gap rewel antar elemen Streamlit yang beda
+    (yang sebelumnya bikin dua baris numpuk/tabrakan, bukan bertumpuk).
+    Seluruh blok (termasuk nama app yang statis) dirender lewat fragment
+    ini supaya jam di captionnya ikut auto-refresh tiap REFRESH_SECONDS.
+    Label caption SENGAJA selalu "Update terakhir" (tidak lagi berubah
+    jadi "Data terakhir saat bursa tutup" walau di luar jam bursa) --
+    ikon jam 🕒 dipertahankan. Kalau data belum pernah ke-scan sama
+    sekali, caption-nya tidak nampilkan apa-apa dulu (biar gak dobel sama
+    info "sedang menyiapkan data" yang sudah ada di body Dashboard)."""
     updated_dt = st.session_state.get("last_updated")
+    caption_html = ""
     if updated_dt is not None:
         last_upd_str = updated_dt.strftime("%H:%M, %d %b %Y")
-        st.markdown(
-            f'<div class="app_update_caption">🕒 Update terakhir: <b>{last_upd_str}</b> WIB</div>',
-            unsafe_allow_html=True,
+        caption_html = (
+            f'<div class="app_update_caption">🕒 Update terakhir: '
+            f'<b>{last_upd_str}</b> WIB</div>'
         )
+    st.markdown(
+        f'<div class="app_brand_name">Syariah Signal</div>{caption_html}',
+        unsafe_allow_html=True,
+    )
 
 
 with st.container(key="header_status_bar"):
@@ -1905,8 +1893,7 @@ with st.container(key="header_status_bar"):
     col_brand, col_portfolio, col_notif, col_avatar = st.columns([2.6, 0.5, 0.55, 0.7])
 
     with col_brand:
-        st.markdown('<div class="app_brand_name">Syariah Signal</div>', unsafe_allow_html=True)
-        render_header_update_caption()
+        render_header_brand_block()
 
     with col_portfolio:
         if is_subscriber:
@@ -3344,7 +3331,7 @@ def render_top_panel():
         # Kondisi normal (data segar) dulu nampilin banner "Update terakhir"
         # di sini (.update-strip) -- sekarang sudah pindah ke header,
         # ditumpuk di bawah nama app "Syariah Signal" (lihat
-        # render_header_update_caption()), jadi tidak dirender dobel di sini.
+        # render_header_brand_block()), jadi tidak dirender dobel di sini.
 
     df_scan_preview = st.session_state.scan_df
     if df_scan_preview is not None and not df_scan_preview.empty:
