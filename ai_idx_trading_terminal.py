@@ -564,7 +564,7 @@ st.markdown("""
        Portofolio dirender (lihat pemakaian _tight_subheader() di bawah) --
        jadi dijamin kena, gak tergantung tebak-tebakan urutan DOM lagi. */
     .st-key-panel_header_tight {
-        margin-top: -46px !important;
+        margin-top: -20px !important;
     }
 
     /* ---------------------------------------------------------
@@ -1147,6 +1147,18 @@ st.markdown("""
        checkbox yang sama.) */
     .disclaimer-checkbox {
         display: none;
+    }
+    .portfolio-title-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: nowrap;
+    }
+    .portfolio-title-row h3 {
+        margin: 0 !important;
+    }
+    .portfolio-title-row .disclaimer-icon {
+        flex: 0 0 auto;
     }
     .disclaimer-icon {
         cursor: pointer;
@@ -2307,26 +2319,47 @@ def pct_change(df):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_quick_quote_cached(ticker_jk):
-    """Harga terakhir + %perubahan untuk 1 saham (ISSI maupun bukan) --
-    dibaca dari tabel `stock_quotes` di Supabase (diisi scan_worker.py
-    tiap ~15 menit untuk SEMUA saham IDX), BUKAN panggil yfinance
-    langsung. Dipakai di 2 tempat: (1) validasi pas "Tambah ke
+    """Harga terakhir + %perubahan harian & mingguan untuk 1 saham (ISSI
+    maupun bukan) -- dibaca dari tabel `stock_quotes` di Supabase (diisi
+    scan_worker.py tiap ~15 menit untuk SEMUA saham IDX), BUKAN panggil
+    yfinance langsung. Dipakai di 2 tempat: (1) validasi pas "Tambah ke
     Portofolio" (cek kode sahamnya ada/valid), (2) render_portfolio_page
     (tampilan harga saham non-ISSI yang sudah dipegang). Return None
-    kalau ticker tidak ditemukan / belum pernah ke-scan."""
+    kalau ticker tidak ditemukan / belum pernah ke-scan.
+
+    PERBAIKAN: sekarang ikut coba ambil `week_change_pct` juga (dulu cuma
+    price + change_pct) -- dibungkus try terpisah dengan fallback ke query
+    2 kolom lama kalau kolom itu ternyata belum ada di skema tabel
+    `stock_quotes` (biar gak bikin seluruh quote gagal cuma gara-gara 1
+    kolom opsional error)."""
     try:
         res = (
             supabase_client.table("stock_quotes")
-            .select("price, change_pct")
+            .select("price, change_pct, week_change_pct")
             .eq("ticker", ticker_jk)
             .execute()
         )
+    except Exception:
+        try:
+            res = (
+                supabase_client.table("stock_quotes")
+                .select("price, change_pct")
+                .eq("ticker", ticker_jk)
+                .execute()
+            )
+        except Exception:
+            return None
+    try:
         if not res.data:
             return None
         row = res.data[0]
         if row.get("price") is None:
             return None
-        return {"price": row["price"], "change_pct": row.get("change_pct")}
+        return {
+            "price": row["price"],
+            "change_pct": row.get("change_pct"),
+            "week_change_pct": row.get("week_change_pct"),
+        }
     except Exception:
         return None
 
@@ -2738,18 +2771,17 @@ def render_portfolio_page(user_db, identifier, display_name):
     ISSI, dan data dasar SAJA (harga + %harian) untuk saham non-syariah,
     tanpa sinyal/rekomendasi apa pun untuk yang non-syariah."""
     with st.container(key="panel_header_tight"):
-        st.markdown("### 💼 Portofolio Saya")
-
-    st.markdown(
-        '<div class="disclaimer-wrap">'
-        '<input type="checkbox" id="portfolio-disclaimer-toggle" class="disclaimer-checkbox">'
-        '<label for="portfolio-disclaimer-toggle" class="disclaimer-icon">ℹ️ Tentang portofolio ini</label>'
-        '<label for="portfolio-disclaimer-toggle" class="disclaimer-backdrop"></label>'
-        '<div class="disclaimer-popup">Tambahkan kode saham yang kamu pantau. '
-        'Saham ISSI (syariah) dapat data lengkap; saham non-syariah cuma '
-        'ditampilkan harga &amp; perubahan harian, tanpa sinyal/rekomendasi.'
-        '<br><span class="disclaimer-hint">Tap di luar kotak buat tutup</span></div>'
-        '</div>',
+        st.markdown(
+            '<div class="portfolio-title-row">'
+            '<h3>💼 Portofolio Saya</h3>'
+            '<input type="checkbox" id="portfolio-disclaimer-toggle" class="disclaimer-checkbox">'
+            '<label for="portfolio-disclaimer-toggle" class="disclaimer-icon">ℹ️</label>'
+            '<label for="portfolio-disclaimer-toggle" class="disclaimer-backdrop"></label>'
+            '<div class="disclaimer-popup">Tambahkan kode saham yang kamu pantau. '
+            'Saham ISSI (syariah) dapat data lengkap; saham non-syariah cuma '
+            'ditampilkan harga &amp; perubahan harian, tanpa sinyal/rekomendasi.'
+            '<br><span class="disclaimer-hint">Tap di luar kotak buat tutup</span></div>'
+            '</div>',
         unsafe_allow_html=True,
     )
 
@@ -2805,16 +2837,30 @@ def render_portfolio_page(user_db, identifier, display_name):
                 bandar_txt = "–"
                 row_cls = ""
         else:
-            # PERBAIKAN: sebelumnya baris non-syariah masih nampilin
-            # harga/%harian per kolom (isinya sering "–" semua kalau quote
-            # gagal diambil, kelihatan kosong/bingung). Sekarang disatukan
-            # jadi 1 sel lebar penuh bertuliskan "TIDAK SYARIAH" dengan
-            # tint merah transparan (lihat CSS .nonsyariah-cell) -- kode
-            # sahamnya sendiri tetap ditampilkan & tetap bisa diklik.
+            # PERBAIKAN: sesuai revisi terbaru -- saham non-syariah TETAP
+            # dikasih data HARGA + %HARI INI + %MINGGU INI (kalau ada),
+            # cuma 3 kolom terakhir (SCORE/STATUS/BANDAR) yang disatukan
+            # jadi 1 sel "TIDAK SYARIAH" dengan tint merah transparan
+            # (kolom-kolom itu emang gak relevan buat saham non-syariah --
+            # gak ada skor/sinyal/analisa bandar).
+            quote = get_quick_quote_cached(ticker_jk)
+            if quote:
+                price = format_harga(quote["price"])
+                daily = quote.get("change_pct")
+                weekly = quote.get("week_change_pct")
+                daily_cls = "gain-up" if (daily is not None and daily >= 0) else ("gain-down" if daily is not None else "")
+                weekly_cls = "gain-up" if (weekly is not None and weekly >= 0) else ("gain-down" if weekly is not None else "")
+            else:
+                price, daily, weekly, daily_cls, weekly_cls = "–", None, None, "", ""
+            daily_txt = f"{daily:+.2f}%" if daily is not None else "–"
+            weekly_txt = f"{weekly:+.2f}%" if weekly is not None else "–"
             rows_html.append(
                 f'<tr>'
                 f'<td><a class="stock-link" href="?stock={ticker_jk}" target="_self"><b>{code}</b></a></td>'
-                f'<td class="nonsyariah-cell" colspan="6">⚠️ TIDAK SYARIAH — tanpa data &amp; sinyal</td>'
+                f'<td>{price}</td>'
+                f'<td class="{daily_cls}">{daily_txt}</td>'
+                f'<td class="{weekly_cls}">{weekly_txt}</td>'
+                f'<td class="nonsyariah-cell" colspan="3">⚠️ TIDAK SYARIAH</td>'
                 f'</tr>'
             )
             continue
