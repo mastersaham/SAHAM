@@ -778,6 +778,19 @@ st.markdown("""
         transform: none !important;
     }
 
+    /* Tombol "📲 Kirim Sekarang" di halaman Alert (kirim Best Pick ke
+       Telegram) -- disamain jadi solid oranye flat kayak tombol Hapus di
+       atas, bukan gradasi+glow kayak tombol aksi umum. */
+    .st-key-send_telegram_confirm_btn button {
+        background: #ff8c00 !important;
+        box-shadow: none !important;
+    }
+    .st-key-send_telegram_confirm_btn button:hover {
+        background: #e67e00 !important;
+        box-shadow: none !important;
+        transform: none !important;
+    }
+
     .card {
         background: rgba(255,255,255,0.045);
         border: 1px solid rgba(255,255,255,0.08);
@@ -2176,6 +2189,10 @@ with st.container(key="header_status_bar"):
                     st.warning("❌ Belum berlangganan")
                 st.divider()
                 if st.button("🔒 Privasi Akun", use_container_width=True, key="open_privacy_btn"):
+                    # Sama kayak fix di popover nav Screener/Trading/Bandar/
+                    # Alert -- clear query param "stock" biar gak nyangkut
+                    # di halaman Detail Saham kalau tombol ini diklik dari sana.
+                    st.query_params.clear()
                     st.session_state.active_panel = "privacy"
                     st.session_state["profile_popover_seed"] += 1
                     st.rerun()
@@ -2241,6 +2258,14 @@ with st.container(key="header_status_bar"):
                             # render lebih tinggi & gak pernah direset di sini
                             # (beda dari tombol HOME yang resetnya lengkap,
                             # lihat _go_to_dashboard()). Disamakan sekarang.
+                            # PERBAIKAN BUG: kalau lagi di halaman Detail Saham
+                            # (URL ada ?stock=KODE), klik menu Screener/
+                            # Trading/Bandar/Alert TIDAK NGARUH -- karena
+                            # render_stock_detail_page() dicek PALING AWAL
+                            # (lewat query param "stock"), sebelum active_panel
+                            # sempat dibaca. Query param itu harus di-clear di
+                            # sini juga, sama kayak yang dilakukan _go_to_dashboard().
+                            st.query_params.clear()
                             st.session_state["show_portfolio"] = False
                             st.session_state["show_customer_panel"] = False
                             st.session_state.active_panel = panel_key
@@ -2270,7 +2295,9 @@ with st.container(key="bottom_komunitas_bar"):
     if st.button("💬 Komunitas", key="komunitas_bottom_btn", use_container_width=True):
         # PERBAIKAN BUG: sama seperti tombol nav popover di atas -- tanpa
         # ini, klik "Komunitas" gak ngaruh kalau lagi di halaman
-        # Portofolio/Customer Panel.
+        # Portofolio/Customer Panel, ATAU kalau lagi di halaman Detail
+        # Saham (query param "stock" perlu di-clear juga).
+        st.query_params.clear()
         st.session_state["show_portfolio"] = False
         st.session_state["show_customer_panel"] = False
         st.session_state.active_panel = "community"
@@ -3485,11 +3512,8 @@ def render_stock_detail_page(ticker_raw):
                 meta = " · ".join(x for x in [article["source"], article["pub_date"]] if x)
                 if meta:
                     cols[1].caption(meta)
-                if article["description"]:
-                    st.caption(
-                        article["description"][:220]
-                        + ("..." if len(article["description"]) > 220 else "")
-                    )
+                # PERBAIKAN: sama kayak di _render_news_cards() -- description
+                # dari Google News RSS isinya HTML mentah, judul aja cukup.
                 if article["link"]:
                     st.markdown(f"[Baca selengkapnya]({article['link']})")
 
@@ -3702,8 +3726,10 @@ def _render_news_cards(news_items, show_stock_tag):
                 meta = " · ".join(x for x in [news["source"], news["pub_date"]] if x)
                 if meta:
                     meta_col.caption(meta)
-                if news["description"]:
-                    st.caption(news["description"][:220] + ("..." if len(news["description"]) > 220 else ""))
+                # PERBAIKAN: field "description" dari Google News RSS isinya
+                # HTML mentah (tag <a>/<font>), bukan cuplikan asli -- makanya
+                # dulu nongol kayak link berantakan. Judul aja sudah cukup,
+                # jadi bagian ini sengaja tidak ditampilkan lagi.
                 if news["link"]:
                     st.markdown(f"[Baca selengkapnya]({news['link']})")
 
