@@ -43,6 +43,7 @@ Environment variables yang dibutuhkan (GitHub Actions Secrets):
 import os
 import sys
 import json
+import math
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -184,27 +185,75 @@ def run_fundamentals(client, universe):
     print(f"  stock_fundamentals: {sent}/{len(universe)} saham OK.")
 
 
-def run_news(client, universe):
+# ============================================================
+#  BERITA -- SEKARANG DIPECAH JADI 3 RUN PRA-MARKET (06:00/07:00/08:00
+#  WIB), BUKAN numpuk di run jam 09:00 bareng history/fundamental/
+#  broker. Alasan: ~900 saham + 6 query umum kalau di-fetch sekaligus
+#  jadi beban berat pas run jam 09:00 (yang juga udah nanggung tugas
+#  harian lain), DAN makin banyak request beruntun makin gampang kena
+#  rate-limit/block dari Google News. Dipecah 1/3 universe per run
+#  (jam 6/7/8) -- progress-nya disimpan di daily_job_state.progress,
+#  direset otomatis tiap ganti hari (WIB). Begitu jam 09:00 tiba,
+#  berita udah kelar duluan, jadi run itu TIDAK perlu ngerjain berita
+#  lagi (lihat main() -- run_news_chunk() cuma dipanggil kalau
+#  JOB_MODE=news_prefetch, bukan bagian dari bundle "tugas harian").
+#
+#  CATATAN: kalau salah satu dari 3 slot pra-market ini ke-skip/gagal
+#  (misal cron GitHub Actions meleset), progress buat hari itu bakal
+#  kurang dari 100% dan TIDAK ada usaha nyusul di run jam 09:00 ke
+#  atas (sesuai permintaan -- run market-hours sengaja gak nanggung
+#  berita lagi). Sisa saham yang kelewat baru kekejar di run
+#  pra-market besok.
+# ============================================================
+
+NEWS_PREFETCH_SLOTS = 3  # jumlah run pra-market (06:00/07:00/08:00 WIB)
+
+
+def run_news_chunk(client, universe):
+    """Ambil berita buat SEBAGIAN universe (kira-kira 1/3), lanjut dari
+    progress terakhir hari ini (WIB). Berita umum (GENERAL) cuma di-fetch
+    sekali, di slot pertama (progress masih 0)."""
+    job_name = "news"
+    today_str = str(_today_wib())
+
+    try:
+        res = client.table("daily_job_state").select("last_run_date, progress").eq("job_name", job_name).execute()
+        row = res.data[0] if res.data else None
+    except Exception as e:
+        print(f"  [WARNING] gagal cek progress berita, anggap mulai dari 0: {e}")
+        row = None
+
+    progress = row["progress"] or 0 if row and str(row.get("last_run_date")) == today_str else 0
+    total = len(universe)
+
+    if progress >= total:
+        print(f"  news_prefetch: berita hari ini sudah lengkap ({progress}/{total}), skip.")
+        return
+
+    chunk_size = math.ceil(total / NEWS_PREFETCH_SLOTS)
+    chunk = universe[progress: progress + chunk_size]
+
     rows = []
-    rows.extend(se.fetch_general_news(max_items_per_query=5))
-    for i, ticker in enumerate(universe):
+    if progress == 0:
+        rows.extend(se.fetch_general_news(max_items_per_query=5))
+
+    for i, ticker in enumerate(chunk):
         kode = ticker.replace(".JK", "")
         items = se.fetch_news(ticker, f"{kode} saham", max_items=8)
         rows.extend(items)
-        if (i + 1) % 50 == 0:
-            print(f"  stock_news: {i + 1}/{len(universe)} saham diproses...")
         time.sleep(0.1)
-    # PERBAIKAN: dulu on_conflict cuma "link" -- kalau ada artikel yang
-    # linknya sama persis muncul di hasil pencarian umum (GENERAL) DAN
-    # di hasil pencarian saham tertentu (kebetulan artikelnya nyebut
-    # saham itu), baris GENERAL bakal ke-TIMPA jadi ticker saham
-    # tersebut (karena diproses belakangan). Ini penyebab tabel
-    # stock_news isinya per-saham doang, GENERAL selalu kosong. Sekarang
-    # kunci konfliknya ticker+link, jadi 1 artikel bisa nempel ke GENERAL
-    # dan ke saham tertentu tanpa saling timpa. BUTUH constraint unique
-    # (ticker, link) di tabel Supabase -- lihat catatan migrasi SQL.
+
     sent = upsert_chunks(client, "stock_news", rows, on_conflict="ticker,link")
-    print(f"  stock_news: {sent}/{len(rows)} artikel OK.")
+    new_progress = progress + len(chunk)
+    print(f"  news_prefetch: {sent} artikel OK ({new_progress}/{total} saham diproses hari ini).")
+
+    try:
+        client.table("daily_job_state").upsert(
+            {"job_name": job_name, "last_run_date": today_str, "progress": new_progress},
+            on_conflict="job_name",
+        ).execute()
+    except Exception as e:
+        print(f"  [WARNING] gagal update progress berita: {e}")
 
 
 def run_broker_summary(client, universe, goapi_api_key):
@@ -231,12 +280,27 @@ def main():
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
     goapi_api_key = os.environ.get("GOAPI_API_KEY", "")
+    job_mode = os.environ.get("JOB_MODE", "full")
 
     if not supabase_url or not supabase_key:
         print("ERROR: SUPABASE_URL / SUPABASE_SERVICE_KEY belum diisi di environment.")
         sys.exit(1)
 
     client = create_client(supabase_url, supabase_key)
+
+    # ---- MODE: news_prefetch -- dipicu jam 06:00/07:00/08:00 WIB
+    # (lihat scan.yml), SEBELUM bursa buka. Sengaja RINGAN: cuma
+    # ngambil sebagian berita (lihat run_news_chunk()), gak nyentuh
+    # scan/intraday/quote/history/fundamental/broker sama sekali,
+    # biar run pra-market ini cepat & gak numpuk beban. ----
+    if job_mode == "news_prefetch":
+        print("=== Mode: News Prefetch (pra-market) ===")
+        full_universe, all_is_live = se.get_all_idx_stocks()
+        print(f"Daftar SEMUA saham IDX: {len(full_universe)} saham (sumber: "
+              f"{'live IDX' if all_is_live else 'fallback statis (cuma ISSI)'}).")
+        run_news_chunk(client, full_universe)
+        print("Selesai (news prefetch).")
+        return
 
     issi_stocks, issi_is_live = se.get_issi_stocks()
     print(f"Daftar ISSI: {len(issi_stocks)} saham (sumber: "
@@ -253,11 +317,14 @@ def main():
     run_intraday(client, full_universe)
     run_quotes(client, full_universe)
 
-    print("=== [3/3] Tugas harian (history/fundamental/berita/broker, SEMUA saham) ===")
+    # PERBAIKAN: berita SUDAH TIDAK bagian dari bundle ini -- sudah
+    # di-prefetch bertahap jam 06:00/07:00/08:00 WIB lewat mode
+    # news_prefetch di atas (run_news_chunk()), jadi run jam 09:00 ke
+    # atas gak perlu nanggung beban berita lagi.
+    print("=== [3/3] Tugas harian (history/fundamental/broker, SEMUA saham) ===")
     if should_run_daily_job(client, "daily_tasks"):
         run_daily_history(client, full_universe)
         run_fundamentals(client, full_universe)
-        run_news(client, full_universe)
         run_broker_summary(client, full_universe, goapi_api_key)
         mark_daily_job_done(client, "daily_tasks")
         print("Tugas harian selesai & ditandai selesai untuk hari ini.")
