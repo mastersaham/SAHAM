@@ -148,16 +148,20 @@ def run_quotes(client, universe, batch_size=60):
     print(f"  stock_quotes: {sent}/{len(universe)} saham OK.")
 
 
-def run_daily_history(client, universe):
+def run_daily_history(client, universe, batch_size=60):
+    """PERBAIKAN: dulu pakai get_daily_history() 1 request per saham
+    (~900 saham berurutan) -- gampang kena rate-limit/block Yahoo dari
+    IP shared GitHub Actions, dan gagalnya diam-diam (exception ketelan
+    di scan_engine.py) sehingga tabel stock_history bisa kosong tanpa
+    ada error yang keliatan di log. Sekarang pakai
+    get_daily_history_batch() (1 request per 60 saham), sama pola
+    dengan run_intraday()/run_quotes()."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    rows = []
-    for i, ticker in enumerate(universe):
-        data = se.get_daily_history(ticker)
-        if data:
-            rows.append({"ticker": ticker, "data": data, "updated_at": now_iso})
-        if (i + 1) % 50 == 0:
-            print(f"  stock_history: {i + 1}/{len(universe)} saham diproses...")
-        time.sleep(0.05)
+    data_by_ticker = se.get_daily_history_batch(universe, batch_size=batch_size)
+    rows = [
+        {"ticker": ticker, "data": data, "updated_at": now_iso}
+        for ticker, data in data_by_ticker.items()
+    ]
     sent = upsert_chunks(client, "stock_history", rows, on_conflict="ticker")
     print(f"  stock_history: {sent}/{len(universe)} saham OK.")
 
@@ -190,7 +194,16 @@ def run_news(client, universe):
         if (i + 1) % 50 == 0:
             print(f"  stock_news: {i + 1}/{len(universe)} saham diproses...")
         time.sleep(0.1)
-    sent = upsert_chunks(client, "stock_news", rows, on_conflict="link")
+    # PERBAIKAN: dulu on_conflict cuma "link" -- kalau ada artikel yang
+    # linknya sama persis muncul di hasil pencarian umum (GENERAL) DAN
+    # di hasil pencarian saham tertentu (kebetulan artikelnya nyebut
+    # saham itu), baris GENERAL bakal ke-TIMPA jadi ticker saham
+    # tersebut (karena diproses belakangan). Ini penyebab tabel
+    # stock_news isinya per-saham doang, GENERAL selalu kosong. Sekarang
+    # kunci konfliknya ticker+link, jadi 1 artikel bisa nempel ke GENERAL
+    # dan ke saham tertentu tanpa saling timpa. BUTUH constraint unique
+    # (ticker, link) di tabel Supabase -- lihat catatan migrasi SQL.
+    sent = upsert_chunks(client, "stock_news", rows, on_conflict="ticker,link")
     print(f"  stock_news: {sent}/{len(rows)} artikel OK.")
 
 
