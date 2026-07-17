@@ -1,17 +1,23 @@
 """
-community_feed.py (FINAL, PATCHED)
+community_feed.py (FINAL, PATCHED v2)
 ==========================
-Community Feed untuk SahamPro dengan:
-- Posting text (max 200 karakter) + kategori + gambar opsional
-- Reaction emoji (bukan like biasa)
+Community Feed dengan:
+- Posting text (max 200 karakter) + reaction emoji (bukan like biasa)
+- Balas komentar per post (bukan upload foto lagi -- lihat CATATAN v2)
 - Trending section (3 post teratas, reaction terbanyak dalam 4 jam terakhir)
 - Countdown "hilang dalam X jam" (post auto-hapus tiap 24 jam via pg_cron)
 - Report spam
+- Badge "X postingan belum dibaca" buat bottom bar Komunitas di app utama
 
 Cara pakai di app utama:
 
-    from community_feed import render_community_feed
+    from community_feed import (
+        render_community_feed, get_unread_post_count, mark_community_seen,
+    )
     render_community_feed(supabase, user_id, username)
+
+    # Badge notif di bottom bar (dipanggil di luar panel Community):
+    unread = get_unread_post_count(supabase, user_id)
 
 Autorefresh (opsional, taruh di halaman feed ini saja):
 
@@ -19,7 +25,7 @@ Autorefresh (opsional, taruh di halaman feed ini saja):
     st_autorefresh(interval=20000, key="feed_refresh")   # 20 detik
 
 ===========================================================================
-CATATAN PERBAIKAN (dokter kode, lihat masing-masing komentar "PERBAIKAN"):
+CATATAN PERBAIKAN v1 (dokter kode, lihat masing-masing komentar "PERBAIKAN"):
 
 1. BUG PALING FATAL (bikin app CRASH): key widget dulu pakai
    `rank_badge or 'feed'`. Di Python, `0 or 'feed'` == 'feed' karena 0
@@ -42,23 +48,51 @@ CATATAN PERBAIKAN (dokter kode, lihat masing-masing komentar "PERBAIKAN"):
    bungkus try/except supaya kalau Supabase lagi bermasalah, yang
    muncul pesan error yang jelas -- bukan halaman crash total.
 ===========================================================================
+CATATAN PERUBAHAN v2 (request UI/UX terbaru):
+
+1. Header "🌟 Community Feed" + kategori (pilih kategori pas posting,
+   dan filter kategori di bawah tombol Posting) DIHAPUS -- form posting
+   sekarang cuma isi tulisan doang, feed selalu tampilkan semua post
+   (tanpa filter). `category` tetap disimpan ke DB (diisi "umum" secara
+   diam-diam) cuma buat jaga-jaga kalau kolomnya NOT NULL di Supabase --
+   tidak ditampilkan lagi di mana pun di UI.
+2. Upload foto (screenshot) DIHAPUS TOTAL -- fungsi _upload_image() dan
+   kolom image_url tidak dipakai lagi. Sebagai gantinya, post sekarang
+   bisa dibalas lewat KOMENTAR (lihat _create_comment / _bulk_comments).
+   Butuh tabel baru di Supabase, `post_comments`:
+       id (uuid/serial, PK), post_id (FK -> posts.id),
+       user_id (text), username (text), content (text),
+       created_at (timestamptz, default now())
+3. Badge notif "X postingan belum dibaca" di bottom bar Komunitas app
+   utama butuh tabel baru `community_last_seen`:
+       user_id (text, PRIMARY KEY), seen_at (timestamptz)
+   Kalau salah satu tabel baru ini belum dibuat di Supabase, fitur
+   terkait otomatis "mati aman" (try/except) -- TIDAK bikin app crash,
+   cuma fitur itu aja yang tidak jalan (komentar gagal disimpan / badge
+   unread selalu 0).
+===========================================================================
 """
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-import uuid
 
 MAX_CHARS = 200
+COMMENT_MAX_CHARS = 200
 TRENDING_WINDOW_HOURS = 4
 TRENDING_MIN_REACTIONS = 3
 POST_LIFETIME_HOURS = 24
 
+# CATATAN v2: kategori tidak lagi dipilih user / dipakai buat filter di
+# UI (lihat "CATATAN PERUBAHAN v2" di atas). Dict ini dibiarkan ada
+# cuma buat jaga-jaga (referensi kalau suatu saat mau diaktifkan lagi),
+# TIDAK dipakai di render_community_feed / _render_post_card lagi.
 CATEGORY_LABELS = {
     "umum": "💬 Umum",
     "hasil_scan": "🎯 Hasil Scan",
     "profit": "💰 Profit",
     "analisis": "📊 Analisis",
 }
+DEFAULT_CATEGORY = "umum"
 
 REACTIONS = {
     "like": "👍",
@@ -129,36 +163,21 @@ def _time_left(created_at_str: str) -> str:
 
 
 # ---------------------------------------------------------------
-# Data layer
+# Data layer -- posts
 # ---------------------------------------------------------------
 
-def _upload_image(supabase, file):
-    if file is None:
-        return None
-    try:
-        ext = file.name.split(".")[-1]
-        filename = f"{uuid.uuid4().hex}.{ext}"
-        supabase.storage.from_("post-images").upload(
-            filename, file.getvalue(), {"content-type": file.type}
-        )
-        return supabase.storage.from_("post-images").get_public_url(filename)
-    except Exception as e:
-        st.warning(f"Gagal upload gambar: {e}")
-        return None
-
-
-def _create_post(supabase, user_id, username, category, content, image_file=None):
+def _create_post(supabase, user_id, username, content):
     # PERBAIKAN: dibungkus try/except -- kalau insert ke Supabase gagal
     # (RLS, koneksi putus, dst), user dapat pesan error yang jelas,
     # bukan halaman Community Feed crash total.
+    # CATATAN v2: tidak ada lagi image_file / kategori pilihan user --
+    # category diisi DEFAULT_CATEGORY diam-diam (jaga-jaga kolom NOT NULL).
     try:
-        image_url = _upload_image(supabase, image_file) if image_file else None
         supabase.table("posts").insert({
             "user_id": user_id,
             "username": username,
-            "category": category,
+            "category": DEFAULT_CATEGORY,
             "content": content,
-            "image_url": image_url,
         }).execute()
         return True, None
     except Exception as e:
@@ -213,8 +232,8 @@ def _notify(supabase, recipient_id, actor_id, actor_username, post_id, ntype, em
             "emoji": emoji,
         }).execute()
     except Exception:
-        # Gagal kirim notifikasi TIDAK boleh bikin reaction/post gagal
-        # juga -- ini cuma fitur pelengkap, bukan fitur inti.
+        # Gagal kirim notifikasi TIDAK boleh bikin reaction/post/komentar
+        # gagal juga -- ini cuma fitur pelengkap, bukan fitur inti.
         pass
 
 
@@ -290,6 +309,92 @@ def _get_trending_posts(supabase, limit: int = 3):
 
 
 # ---------------------------------------------------------------
+# Data layer -- komentar/balasan (v2, gantiin upload foto)
+# ---------------------------------------------------------------
+
+def _bulk_comments(supabase, post_ids):
+    """Ambil semua komentar utk sekumpulan post_ids dalam 1 query (bukan
+    1 query per post -- sama semangatnya kayak _bulk_reactions_summary),
+    di-mapping ke {post_id: [komentar, ...]} urut LAMA -> BARU. Butuh
+    tabel `post_comments` (lihat CATATAN PERUBAHAN v2 di docstring atas)
+    -- kalau tabelnya belum ada, aman: return {} (post tampil tanpa
+    komentar, bukan error)."""
+    if not post_ids:
+        return {}
+    try:
+        res = supabase.table("post_comments").select("*").in_(
+            "post_id", post_ids
+        ).order("created_at").execute()
+    except Exception:
+        return {}
+    grouped = {}
+    for row in (res.data or []):
+        grouped.setdefault(row["post_id"], []).append(row)
+    return grouped
+
+
+def _create_comment(supabase, post, user_id, username, content):
+    try:
+        supabase.table("post_comments").insert({
+            "post_id": post["id"],
+            "user_id": user_id,
+            "username": username,
+            "content": content,
+        }).execute()
+        _notify(supabase, post["user_id"], user_id, username, post["id"], "comment")
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+# ---------------------------------------------------------------
+# Data layer -- badge "X postingan belum dibaca" (v2)
+# ---------------------------------------------------------------
+
+@st.cache_data(ttl=20, show_spinner=False)
+def get_unread_post_count(_supabase, user_id):
+    """Jumlah post dari USER LAIN yang dibuat setelah terakhir kali user
+    ini buka panel Community (community_last_seen.seen_at) -- dipakai
+    buat badge "X postingan belum dibaca" di bottom bar Komunitas app
+    utama. Argumen client Supabase dikasih nama `_supabase` (bukan
+    `supabase`) supaya TIDAK ikut di-hash Streamlit (client Supabase
+    tidak hashable) -- konvensi @st.cache_data standar.
+
+    Butuh tabel `community_last_seen` (lihat docstring atas). Kalau
+    tabel belum ada / query gagal, aman -- return 0 (bar kuning polos
+    tanpa badge, bukan error)."""
+    try:
+        seen_res = _supabase.table("community_last_seen").select("seen_at").eq(
+            "user_id", user_id
+        ).execute()
+        seen_at = seen_res.data[0]["seen_at"] if seen_res.data else None
+
+        query = _supabase.table("posts").select("id", count="exact").neq("user_id", user_id)
+        if seen_at:
+            query = query.gt("created_at", seen_at)
+        res = query.execute()
+        return res.count or 0
+    except Exception:
+        return 0
+
+
+def mark_community_seen(supabase, user_id):
+    """Tandai panel Community baru saja dibuka user ini -- dipanggil di
+    awal render_community_feed() supaya badge notif unread ke-reset.
+    Aman kalau tabel `community_last_seen` belum ada (try/except)."""
+    try:
+        supabase.table("community_last_seen").upsert({
+            "user_id": user_id,
+            "seen_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception:
+        pass
+    # Cache count di atas jadi basi begitu seen_at berubah -- bersihkan
+    # supaya rerun berikutnya baca angka baru, bukan cache 20 detik lama.
+    get_unread_post_count.clear()
+
+
+# ---------------------------------------------------------------
 # UI: render satu kartu post (dipakai di trending & feed biasa)
 # ---------------------------------------------------------------
 
@@ -300,20 +405,21 @@ _NOT_GIVEN = object()
 
 def _render_post_card(
     supabase, post, current_user_id, current_username, rank_badge=None,
-    reactions_summary=None, user_reaction=_NOT_GIVEN,
+    reactions_summary=None, user_reaction=_NOT_GIVEN, comments=None,
 ):
     """
-    reactions_summary / user_reaction: kalau dikasih (dari bulk fetch di
-    render_community_feed), dipakai langsung -- TIDAK query lagi ke
-    Supabase. Kalau tidak dikasih (dipanggil dari tempat lain), fallback
-    fetch sendiri per-post biar tetap kompatibel.
+    reactions_summary / user_reaction / comments: kalau dikasih (dari
+    bulk fetch di render_community_feed), dipakai langsung -- TIDAK
+    query lagi ke Supabase. Kalau tidak dikasih (dipanggil dari tempat
+    lain), fallback fetch sendiri per-post biar tetap kompatibel.
     """
     suffix = _key_suffix(rank_badge)
     with st.container(key=f"post_{post['id']}_{suffix}", border=True):
         col1, col2, col3 = st.columns([5, 1, 1])
         with col1:
-            header = f"**{post['username']}** · {CATEGORY_LABELS.get(post['category'], '💬')}"
-            st.markdown(header)
+            # CATATAN v2: tag kategori (dulu "💬 Umum" dst) sudah tidak
+            # ditampilkan lagi -- pilihan kategori & filter-nya dihapus.
+            st.markdown(f"**{post['username']}**")
             st.caption(f"{_time_ago(post['created_at'])} · {_time_left(post['created_at'])}")
         with col2:
             if post["user_id"] == current_user_id:
@@ -348,8 +454,8 @@ def _render_post_card(
             )
 
         st.write(post["content"])
-        if post.get("image_url"):
-            st.image(post["image_url"], use_container_width=True)
+        # CATATAN v2: upload/tampilan foto (image_url) sudah dihapus total
+        # -- post sekarang teks + reaction + komentar saja.
 
         if reactions_summary is None:
             summary = _bulk_reactions_summary(supabase, [post["id"]]).get(post["id"], {})
@@ -374,12 +480,56 @@ def _render_post_card(
                     _toggle_reaction(supabase, post, current_user_id, current_username, key)
                     st.rerun()
 
+        # ---- Komentar/balasan (v2, gantiin upload foto) ----
+        comment_list = comments if comments is not None else _bulk_comments(
+            supabase, [post["id"]]
+        ).get(post["id"], [])
+
+        if comment_list:
+            with st.expander(f"💬 {len(comment_list)} balasan", expanded=False):
+                for c in comment_list:
+                    st.markdown(
+                        f"**{c['username']}** "
+                        f"<span style='color:#9ca3af; font-size:11px;'>· {_time_ago(c['created_at'])}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(c["content"])
+        else:
+            st.caption("💬 Belum ada balasan")
+
+        with st.form(f"reply_form_{post['id']}_{suffix}", clear_on_submit=True, border=False):
+            rcol1, rcol2 = st.columns([5, 1])
+            with rcol1:
+                reply_text = st.text_input(
+                    "Balas",
+                    key=f"reply_input_{post['id']}_{suffix}",
+                    label_visibility="collapsed",
+                    placeholder="Tulis balasan...",
+                    max_chars=COMMENT_MAX_CHARS,
+                )
+            with rcol2:
+                reply_submitted = st.form_submit_button("Balas", use_container_width=True)
+            if reply_submitted:
+                if not reply_text.strip():
+                    st.warning("Tulis dulu balasannya.")
+                else:
+                    ok, err = _create_comment(
+                        supabase, post, current_user_id, current_username, reply_text.strip()
+                    )
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(f"Gagal membalas: {err}")
+
 
 # ---------------------------------------------------------------
 # Main entrypoint
 # ---------------------------------------------------------------
 
 def render_community_feed(supabase, current_user_id: str, current_username: str, limit: int = 30):
+    # Tandai panel Community baru saja dibuka -- reset badge "X postingan
+    # belum dibaca" di bottom bar (lihat get_unread_post_count).
+    mark_community_seen(supabase, current_user_id)
 
     # ---------- TRENDING SECTION (paling atas) ----------
     trending = _get_trending_posts(supabase)
@@ -390,31 +540,27 @@ def render_community_feed(supabase, current_user_id: str, current_username: str,
         trending_ids = [p["id"] for p in trending]
         t_summaries = _bulk_reactions_summary(supabase, trending_ids)
         t_user_reactions = _bulk_user_reactions(supabase, trending_ids, current_user_id)
+        t_comments = _bulk_comments(supabase, trending_ids)
 
         for i, post in enumerate(trending):
             _render_post_card(
                 supabase, post, current_user_id, current_username, rank_badge=i,
                 reactions_summary=t_summaries.get(post["id"], {}),
                 user_reaction=t_user_reactions.get(post["id"]),
+                comments=t_comments.get(post["id"], []),
             )
         st.divider()
 
     # ---------- FORM POSTING ----------
-    st.markdown("### 🌟 Community Feed")
-    st.caption(f"Sharing hasil scan, profit, atau analisis kamu (maks {MAX_CHARS} karakter)")
-
+    # CATATAN v2: header "🌟 Community Feed" + pilihan kategori dihapus --
+    # form sekarang langsung ke kotak tulisan, tanpa judul/kategori.
     with st.container(key="feed_post_form"):
         with st.form("new_post_form", clear_on_submit=True):
-            category = st.selectbox(
-                "Kategori", options=list(CATEGORY_LABELS.keys()),
-                format_func=lambda x: CATEGORY_LABELS[x],
-            )
             content = st.text_area(
                 "Apa yang mau kamu share?",
                 placeholder="Contoh: Profit +8.4% dari BBCA & TLKM hari ini 🚀",
                 max_chars=MAX_CHARS,
             )
-            image_file = st.file_uploader("Screenshot (opsional)", type=["png", "jpg", "jpeg"])
             submitted = st.form_submit_button("Posting", use_container_width=True)
 
             if submitted:
@@ -422,8 +568,7 @@ def render_community_feed(supabase, current_user_id: str, current_username: str,
                     st.warning("Isi dulu tulisannya bro.")
                 else:
                     ok, err = _create_post(
-                        supabase, current_user_id, current_username,
-                        category, content.strip(), image_file,
+                        supabase, current_user_id, current_username, content.strip(),
                     )
                     if ok:
                         st.success("Berhasil posting! Post ini akan hilang otomatis dalam 24 jam.")
@@ -433,18 +578,13 @@ def render_community_feed(supabase, current_user_id: str, current_username: str,
 
     st.divider()
 
-    # ---------- FILTER & FEED ----------
-    filter_category = st.radio(
-        "Filter", options=["semua"] + list(CATEGORY_LABELS.keys()),
-        format_func=lambda x: "🔍 Semua" if x == "semua" else CATEGORY_LABELS[x],
-        horizontal=True,
-    )
-
+    # ---------- FEED ----------
+    # CATATAN v2: filter kategori di bawah tombol Posting dihapus --
+    # feed selalu tampilkan semua post terbaru, tanpa filter.
     try:
-        query = supabase.table("posts").select("*").order("created_at", desc=True).limit(limit)
-        if filter_category != "semua":
-            query = query.eq("category", filter_category)
-        posts = query.execute().data or []
+        posts = supabase.table("posts").select("*").order(
+            "created_at", desc=True
+        ).limit(limit).execute().data or []
     except Exception as e:
         st.error(f"Gagal memuat feed: {e}")
         return
@@ -456,10 +596,12 @@ def render_community_feed(supabase, current_user_id: str, current_username: str,
     post_ids = [p["id"] for p in posts]
     summaries = _bulk_reactions_summary(supabase, post_ids)
     user_reactions = _bulk_user_reactions(supabase, post_ids, current_user_id)
+    comments_map = _bulk_comments(supabase, post_ids)
 
     for post in posts:
         _render_post_card(
             supabase, post, current_user_id, current_username, rank_badge=None,
             reactions_summary=summaries.get(post["id"], {}),
             user_reaction=user_reactions.get(post["id"]),
+            comments=comments_map.get(post["id"], []),
         )

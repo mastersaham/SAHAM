@@ -17,7 +17,7 @@ from supabase import create_client
 # Fitur Community Feed (post, reaction, laporan spam) + notifikasi bell.
 # File-file ini harus ada satu folder sama file utama ini:
 #   community_feed.py, notifications.py
-from community_feed import render_community_feed
+from community_feed import render_community_feed, get_unread_post_count
 from notifications import render_notification_bell
 
 st.set_page_config(
@@ -706,7 +706,7 @@ st.markdown("""
         font-size: 26px;
         font-weight: 800;
         letter-spacing: 0.5px;
-        color: #ffffff;
+        color: #ff8a1f;
     }
     .terminal-sub {
         font-size: 13px;
@@ -719,6 +719,32 @@ st.markdown("""
         color: #d9d7ec;
         margin-left: 10px;
         vertical-align: middle;
+    }
+    /* Grid ringkas 2 kolom, tulisan kecil -- dipakai untuk "Info
+       Fundamental" & "Ringkasan Sinyal" di halaman detail saham supaya
+       muat 1 layar dan tidak makan tempat kayak st.metric bawaan. */
+    .mini-stat-block {
+        background: rgba(255,255,255,0.045);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px;
+        padding: 4px 14px;
+    }
+    .mini-stat-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 7px 0;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+        font-size: 12.5px;
+        gap: 10px;
+    }
+    .mini-stat-row:last-child { border-bottom: none; }
+    .mini-stat-label { color: #a9a7c4; }
+    .mini-stat-value {
+        color: #f3f2ef;
+        font-weight: 700;
+        text-align: right;
+        white-space: nowrap;
     }
     .pulse-dot {
         height: 9px; width: 9px; border-radius: 50%;
@@ -1042,7 +1068,11 @@ st.markdown("""
     /* bar Komunitas -- fixed nempel di bawah layar, selalu kelihatan.
        PERBAIKAN: masih ketinggian -- tombolnya masih ikut padding gede
        dari style tombol umum (div.stButton > button, 0.75em). Sekarang
-       padding container & tombol dikecilin biar bar-nya tipis. */
+       padding container & tombol dikecilin biar bar-nya tipis.
+       Tombol (teks+ikon) sekarang RATA KIRI (bukan full-width lagi),
+       sisa ruang di kanan dipakai badge notif "X postingan belum
+       dibaca" (lihat .komunitas-unread-badge) -- kalau tidak ada post
+       baru, kolom kanan kosong, bar cuma polos kuning. */
     .st-key-bottom_komunitas_bar {
         position: fixed;
         left: 0; right: 0; bottom: 0;
@@ -1064,6 +1094,25 @@ st.markdown("""
     .st-key-bottom_komunitas_bar div.stButton > button:hover {
         transform: none !important;
         opacity: 0.85;
+    }
+    .komunitas-unread-badge {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        height: 100%;
+        min-height: 32px;
+        color: #1a0f00;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: right;
+    }
+    .komunitas-unread-badge .dot {
+        display: inline-block;
+        width: 7px; height: 7px;
+        border-radius: 50%;
+        background: #ff2d2d;
+        margin-right: 6px;
+        box-shadow: 0 0 6px rgba(255,45,45,0.7);
     }
 
     /* search bar cari saham -- pill minimalis, outline tipis, ikon nyatu
@@ -2290,18 +2339,36 @@ if status not in ("owner", "active"):
 # ---- Bar Komunitas -- fixed nempel di bawah layar, tetap kelihatan di
 # halaman/panel manapun (posisinya di-pin lewat CSS position:fixed, jadi
 # taruh di sini -- di awal script, sebelum semua percabangan panel --
-# tidak masalah, dia akan tetap muncul di bawah pada tiap rerun). ----
+# tidak masalah, dia akan tetap muncul di bawah pada tiap rerun).
+#
+# Tombol (ikon+teks) rata kiri, sisa ruang kanan dipakai badge notif
+# "X postingan belum dibaca" -- cuma muncul kalau ADA post baru dari
+# user lain sejak terakhir kali panel Community dibuka. Kalau tidak
+# ada, kolom kanan kosong (bar kuning polos saja). ----
 with st.container(key="bottom_komunitas_bar"):
-    if st.button("💬 Komunitas", key="komunitas_bottom_btn", use_container_width=True):
-        # PERBAIKAN BUG: sama seperti tombol nav popover di atas -- tanpa
-        # ini, klik "Komunitas" gak ngaruh kalau lagi di halaman
-        # Portofolio/Customer Panel, ATAU kalau lagi di halaman Detail
-        # Saham (query param "stock" perlu di-clear juga).
-        st.query_params.clear()
-        st.session_state["show_portfolio"] = False
-        st.session_state["show_customer_panel"] = False
-        st.session_state.active_panel = "community"
-        st.rerun()
+    _unread_count = get_unread_post_count(supabase_client, identifier) if supabase_client else 0
+    _bcol1, _bcol2 = st.columns([1, 2])
+    with _bcol1:
+        if st.button("💬 Komunitas", key="komunitas_bottom_btn"):
+            # PERBAIKAN BUG: sama seperti tombol nav popover di atas -- tanpa
+            # ini, klik "Komunitas" gak ngaruh kalau lagi di halaman
+            # Portofolio/Customer Panel, ATAU kalau lagi di halaman Detail
+            # Saham (query param "stock" perlu di-clear juga).
+            st.query_params.clear()
+            st.session_state["show_portfolio"] = False
+            st.session_state["show_customer_panel"] = False
+            st.session_state.active_panel = "community"
+            st.rerun()
+    with _bcol2:
+        if _unread_count > 0:
+            _unread_txt = (
+                "1 postingan belum dibaca" if _unread_count == 1
+                else f"{_unread_count} postingan belum dibaca"
+            )
+            st.markdown(
+                f'<div class="komunitas-unread-badge"><span class="dot"></span>{_unread_txt}</div>',
+                unsafe_allow_html=True,
+            )
 
 # ============================================================
 #  AUTO-REFRESH CONTROL (non-blocking, TIDAK nge-freeze seluruh halaman)
@@ -3228,14 +3295,11 @@ def render_stock_detail_page(ticker_raw):
         if not match.empty:
             scan_row = match.iloc[0]
 
-    # Fundamental diambil di sini (di-cache 6 jam, lihat get_stock_fundamentals)
-    # supaya sektor/industrinya bisa langsung tampil di sebelah kode saham,
-    # sekaligus dipakai ulang lagi nanti di section "Info Fundamental" di
-    # bawah tanpa perlu fetch dua kali.
+    # Fundamental diambil di sini (di-cache 6 jam, lihat get_stock_fundamentals),
+    # dipakai nanti di section "Info Fundamental" di bawah. Tidak lagi
+    # ditampilkan di sebelah kode saham biar tidak dobel.
     with st.spinner("Mengambil info fundamental..."):
         fundamentals = get_stock_fundamentals(ticker_jk)
-    _fund_bits = [b for b in [fundamentals.get("sektor"), fundamentals.get("industri")] if b]
-    fund_inline = " • ".join(_fund_bits) if _fund_bits else "Info fundamental tidak tersedia"
 
     sub_line = "Belum ada di hasil scan terakhir"
     if scan_row is not None:
@@ -3251,7 +3315,7 @@ def render_stock_detail_page(ticker_raw):
         f"""
         <div class="terminal-header">
             <div>
-                <div class="terminal-title">{ticker_no_jk} <span class="stock-fund-inline">{fund_inline}</span></div>
+                <div class="terminal-title">{ticker_no_jk}</div>
                 <div class="terminal-sub">{sub_line}</div>
             </div>
             <div>{badge_html}</div>
@@ -3260,20 +3324,35 @@ def render_stock_detail_page(ticker_raw):
         unsafe_allow_html=True,
     )
 
+    # ---- Kondisi Hari Ini -- dipindah ke paling atas, tepat di bawah
+    # kartu kode saham, supaya langsung kelihatan tanpa scroll ----
+    if scan_row is not None:
+        st.markdown(
+            f'<div class="card">🗓️ <b>Kondisi Hari Ini</b> (bukan prediksi besok) &nbsp;•&nbsp; '
+            f'Bandar: <b>{scan_row["bandar"]}</b> &nbsp;•&nbsp; '
+            f'Swing Drop: <b>{"Ya" if scan_row["swing"] else "Tidak"} '
+            f'({scan_row["drop"]}%)</b> &nbsp;•&nbsp; '
+            f'Fake Breakout: <b>{"Ya" if scan_row["fake_breakout"] else "Tidak"}</b> &nbsp;•&nbsp; '
+            f'Climax Risk: <b>{"Ya" if scan_row["climax_risk"] else "Tidak"}</b> &nbsp;•&nbsp; '
+            f'Weak Close: <b>{"Ya" if scan_row["weak_close"] else "Tidak"}</b></div>',
+            unsafe_allow_html=True,
+        )
+
     # ---- Histori harga (rentang waktu bisa dipilih) ----
     st.subheader("📊 Histori Harga")
-    pcol1, pcol2 = st.columns([3, 2])
+    # Dropdown (bukan radio horizontal) -- tetap bisa pilih semua rentang
+    # waktu (1 Hari s/d Max), tapi cuma 1 baris pendek, tidak makan tempat.
+    pcol1, pcol2, _pcol_spacer = st.columns([2, 2, 3])
     with pcol1:
-        period_label = st.radio(
+        period_label = st.selectbox(
             "Rentang waktu",
             list(PERIOD_OPTIONS.keys()),
             index=4,  # default: "1 Tahun"
-            horizontal=True,
             key="detail_period",
         )
     with pcol2:
-        chart_type = st.radio(
-            "Tampilan grafik", ["Candlestick", "Line"], horizontal=True, key="detail_chart_type"
+        chart_type = st.selectbox(
+            "Tampilan grafik", ["Candlestick", "Line"], key="detail_chart_type"
         )
     with st.spinner("Mengambil data histori..."):
         hist = get_stock_history(ticker_jk, period_label)
@@ -3442,18 +3521,38 @@ def render_stock_detail_page(ticker_raw):
                 unsafe_allow_html=True,
             )
 
-    # ---- Fundamental (detail lengkap; ringkasan sektor/industri sudah
-    # ditampilkan di sebelah kode saham di atas, `fundamentals` di sini
-    # pakai hasil yang sama, sudah di-cache jadi tidak fetch dua kali) ----
+    # ---- Fundamental (detail lengkap) -- dibuat 2 kolom ringkas,
+    # tulisan kecil (bukan st.metric yang gede), biar muat 1 layar ----
     st.subheader("🏢 Info Fundamental")
-    fcols = st.columns(3)
-    fcols[0].metric("Sektor", fundamentals["sektor"] or "Data tidak tersedia")
-    fcols[1].metric("Industri", fundamentals["industri"] or "Data tidak tersedia")
-    fcols[2].metric("Market Cap", _fmt_metric(fundamentals["market_cap"]))
-    fcols2 = st.columns(3)
-    fcols2[0].metric("PER", _fmt_metric(fundamentals["per"], decimals=2))
-    fcols2[1].metric("EPS", _fmt_metric(fundamentals["eps"], decimals=2))
-    fcols2[2].metric("Mata Uang", fundamentals["mata_uang"] or "Data tidak tersedia")
+    ffcol1, ffcol2 = st.columns(2)
+    with ffcol1:
+        st.markdown(
+            f"""
+            <div class="mini-stat-block">
+                <div class="mini-stat-row"><span class="mini-stat-label">Sektor</span>
+                    <span class="mini-stat-value">{fundamentals["sektor"] or "Data tidak tersedia"}</span></div>
+                <div class="mini-stat-row"><span class="mini-stat-label">Industri</span>
+                    <span class="mini-stat-value">{fundamentals["industri"] or "Data tidak tersedia"}</span></div>
+                <div class="mini-stat-row"><span class="mini-stat-label">Market Cap</span>
+                    <span class="mini-stat-value">{_fmt_metric(fundamentals["market_cap"])}</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with ffcol2:
+        st.markdown(
+            f"""
+            <div class="mini-stat-block">
+                <div class="mini-stat-row"><span class="mini-stat-label">PER</span>
+                    <span class="mini-stat-value">{_fmt_metric(fundamentals["per"], decimals=2)}</span></div>
+                <div class="mini-stat-row"><span class="mini-stat-label">EPS</span>
+                    <span class="mini-stat-value">{_fmt_metric(fundamentals["eps"], decimals=2)}</span></div>
+                <div class="mini-stat-row"><span class="mini-stat-label">Mata Uang</span>
+                    <span class="mini-stat-value">{fundamentals["mata_uang"] or "Data tidak tersedia"}</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if not fundamentals.get("sektor") and not fundamentals.get("per"):
         st.caption(
@@ -3462,7 +3561,9 @@ def render_stock_detail_page(ticker_raw):
             "memang tidak punya data lengkap untuk saham ini)."
         )
 
-    # ---- Ringkasan sinyal dari hasil scan terakhir ----
+    # ---- Ringkasan sinyal dari hasil scan terakhir -- juga 2 kolom
+    # ringkas tulisan kecil. Kartu "Kondisi Hari Ini" sudah dipindah ke
+    # paling atas (di bawah kartu kode saham), jadi tidak diulang di sini ----
     st.subheader("🧭 Ringkasan Sinyal (Hasil Scan Terakhir)")
     if scan_row is None:
         st.info(
@@ -3470,25 +3571,36 @@ def render_stock_detail_page(ticker_raw):
             "di dashboard dulu untuk data sinyal terbaru."
         )
     else:
-        scols = st.columns(4)
-        scols[0].metric("Entry", scan_row["entry"])
-        scols[1].metric("TP", scan_row["tp"])
-        scols[2].metric("SL", scan_row["sl"])
-        scols[3].metric("Score", scan_row["score"])
+        sscol1, sscol2 = st.columns(2)
+        with sscol1:
+            st.markdown(
+                f"""
+                <div class="mini-stat-block">
+                    <div class="mini-stat-row"><span class="mini-stat-label">Entry</span>
+                        <span class="mini-stat-value">{scan_row["entry"]}</span></div>
+                    <div class="mini-stat-row"><span class="mini-stat-label">TP</span>
+                        <span class="mini-stat-value">{scan_row["tp"]}</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with sscol2:
+            st.markdown(
+                f"""
+                <div class="mini-stat-block">
+                    <div class="mini-stat-row"><span class="mini-stat-label">SL</span>
+                        <span class="mini-stat-value">{scan_row["sl"]}</span></div>
+                    <div class="mini-stat-row"><span class="mini-stat-label">Score</span>
+                        <span class="mini-stat-value">{scan_row["score"]}</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         st.caption(
             "📈 Trend & Score di atas dipakai untuk label prediksi arah "
-            "di panel Top Gainers/Losers. Kartu di bawah ini beda -- itu "
-            "cuma bacaan kondisi HARI INI (candle terakhir), bukan prediksi."
-        )
-        st.markdown(
-            f'<div class="card">🗓️ <b>Kondisi Hari Ini</b> (bukan prediksi besok) &nbsp;•&nbsp; '
-            f'Bandar: <b>{scan_row["bandar"]}</b> &nbsp;•&nbsp; '
-            f'Swing Drop: <b>{"Ya" if scan_row["swing"] else "Tidak"} '
-            f'({scan_row["drop"]}%)</b> &nbsp;•&nbsp; '
-            f'Fake Breakout: <b>{"Ya" if scan_row["fake_breakout"] else "Tidak"}</b> &nbsp;•&nbsp; '
-            f'Climax Risk: <b>{"Ya" if scan_row["climax_risk"] else "Tidak"}</b> &nbsp;•&nbsp; '
-            f'Weak Close: <b>{"Ya" if scan_row["weak_close"] else "Tidak"}</b></div>',
-            unsafe_allow_html=True,
+            "di panel Top Gainers/Losers. Kartu \"Kondisi Hari Ini\" di "
+            "bagian atas halaman ini beda -- itu cuma bacaan kondisi HARI "
+            "INI (candle terakhir), bukan prediksi."
         )
 
     # ---- Berita khusus saham ini — ditaruh paling bawah ----
@@ -3970,7 +4082,7 @@ else:
     # notif sudah dipasang di header. Panel ini hanya untuk user aktif/owner
     # (sudah dijamin karena st.stop() di atas kalau bukan owner/active). ----
     elif _panel == "community":
-        _tight_subheader("💬 Komunitas SahamPro")
+        _tight_subheader("💬 Komunitas")
         if not supabase_client:
             st.warning(
                 "Community Feed belum aktif — SUPABASE_URL / SUPABASE_SERVICE_KEY "
