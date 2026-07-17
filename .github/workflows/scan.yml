@@ -8,6 +8,24 @@ name: Scan Saham Terpusat
 # menit GitHub Actions, dan sesuai keputusan: app pakai data terakhir
 # bursa buka, bukan scan terus-terusan di luar jam bursa).
 #
+# TAMBAHAN (berita pra-market): 3 jadwal baru jam 06:00/07:00/08:00 WIB
+# (Senin-Jumat) KHUSUS prefetch berita bertahap (~1/3 universe saham per
+# run), SEBELUM bursa buka -- supaya beban ambil berita gak numpuk semua
+# di run jam 09:00 (yang juga udah nanggung history/fundamental/broker),
+# dan makin kecil kemungkinan kena rate-limit Google News karena
+# request-nya kesebar di 3 waktu berbeda, bukan ~900 sekaligus. Job
+# scan_worker.py tau mode-nya lewat env JOB_MODE, ditentukan dari
+# `github.event.schedule` (cron string mana yang match) di step di
+# bawah -- 3 cron pra-market itu di-set JOB_MODE=news_prefetch, sisanya
+# (termasuk workflow_dispatch/repository_dispatch manual) JOB_MODE=full.
+#
+# CATATAN KONVERSI WIB->UTC (WIB = UTC+7):
+#   06:00 WIB = 23:00 UTC HARI SEBELUMNYA -> makanya dow-nya "0-4"
+#               (Minggu-Kamis UTC), bukan "1-5", supaya jatuhnya pas
+#               Senin-Jumat WIB.
+#   07:00 WIB = 00:00 UTC hari yang sama -> dow "1-5" (Senin-Jumat).
+#   08:00 WIB = 01:00 UTC hari yang sama -> dow "1-5" (Senin-Jumat).
+#
 # CATATAN: ini belum memperhitungkan tanggal merah/libur nasional di
 # hari kerja (butuh kalender resmi BEI) -- kalau kebetulan jalan pas
 # libur nasional, paling cuma dapat data yang sama dengan hari
@@ -15,7 +33,8 @@ name: Scan Saham Terpusat
 # hasilnya sama saja).
 #
 # Bisa juga dipicu manual lewat tab "Actions" di GitHub -> pilih
-# workflow ini -> "Run workflow" (ini selalu boleh, kapan saja).
+# workflow ini -> "Run workflow" (ini selalu boleh, kapan saja -- akan
+# jalan mode "full", bukan news_prefetch).
 #
 # TAMBAHAN: "repository_dispatch" -- trigger presisi dari LUAR GitHub,
 # dipicu oleh pg_cron di Supabase (jadwal cron bawaan GitHub Actions
@@ -23,21 +42,39 @@ name: Scan Saham Terpusat
 # jadi Supabase yang "nyubit" workflow ini via API GitHub tiap 30 menit,
 # lebih presisi karena pg_cron jalan native di database). event_type
 # harus sama persis dengan yang dikirim dari sisi Supabase.
+#
+# PENTING (belum ada backup buat 3 jadwal pra-market): pg_cron
+# "nyubitan" dari Supabase di atas SAAT INI cuma nge-cover jam bursa
+# (09:00-16:30 WIB), belum nge-cover 3 slot pra-market yang baru ini.
+# Jadi 3 slot berita (06/07/08 WIB) masih 100% mengandalkan cron bawaan
+# GitHub Actions, yang menurut catatan di atas kadang meleset/ke-skip.
+# Kalau ternyata sering ke-skip juga, tambahin 3 pg_cron job baru di
+# Supabase yang nge-dispatch di 3 jam itu juga (kirim event_type sama:
+# scan-saham-trigger) -- tapi itu bakal jalan mode "full" (bukan
+# news_prefetch) karena repository_dispatch gak punya info cron mana
+# yang dimaksud, jadi kalau mau tetep ringan pas pra-market, trigger
+# manual dari Supabase itu perlu event_type/payload sendiri yang
+# dibedain di step run scan_worker.py.
 on:
   schedule:
-    - cron: "*/30 2-8 * * 1-5"
-    - cron: "30 9 * * 1-5"
+    - cron: "0 23 * * 0-4"     # 06:00 WIB Senin-Jumat -- news prefetch slot 1
+    - cron: "0 0 * * 1-5"      # 07:00 WIB Senin-Jumat -- news prefetch slot 2
+    - cron: "0 1 * * 1-5"      # 08:00 WIB Senin-Jumat -- news prefetch slot 3
+    - cron: "*/30 2-8 * * 1-5" # 09:00-15:30 WIB, tiap 30 menit -- scan full
+    - cron: "30 9 * * 1-5"     # 16:30 WIB -- scan full (buffer closing)
   workflow_dispatch: {}
   repository_dispatch:
     types: [scan-saham-trigger]
 
-# PENTING: job ini sekarang juga fetch histori/fundamental/berita/broker
-# (bukan cuma skor & sinyal), jadi durasinya bisa lebih lama dari 15
-# menit terutama pas "tugas harian" jalan (lihat scan_worker.py).
-# concurrency group ini mencegah 2 run jalan BARENGAN kalau run
-# sebelumnya belum selesai pas jadwal berikutnya nyampe -- run baru akan
-# ANTRE (nunggu), bukan jalan paralel (yang bisa bikin rebutan tulis ke
-# Supabase & double-hit ke Yahoo Finance / GOAPI sekaligus).
+# PENTING: job ini sekarang juga fetch histori/fundamental/broker (bukan
+# cuma skor & sinyal), jadi durasinya bisa lebih lama dari 15 menit
+# terutama pas "tugas harian" jalan (lihat scan_worker.py). Berita
+# SUDAH TIDAK bagian dari run jam 09:00 ke atas -- itu ditangani 3 run
+# pra-market terpisah (lihat komentar di atas). concurrency group ini
+# mencegah 2 run jalan BARENGAN kalau run sebelumnya belum selesai pas
+# jadwal berikutnya nyampe -- run baru akan ANTRE (nunggu), bukan jalan
+# paralel (yang bisa bikin rebutan tulis ke Supabase & double-hit ke
+# Yahoo Finance / GOAPI / Google News sekaligus).
 concurrency:
   group: scan-saham-terpusat
   cancel-in-progress: false
@@ -64,5 +101,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GOAPI_API_KEY: ${{ secrets.GOAPI_API_KEY }}
+          # JOB_MODE=news_prefetch KHUSUS kalau run ini dipicu salah
+          # satu dari 3 cron pra-market (06/07/08 WIB). Trigger lain
+          # (scan full jam bursa, workflow_dispatch manual,
+          # repository_dispatch dari pg_cron) jatuh ke default "full".
+          JOB_MODE: ${{ (github.event.schedule == '0 23 * * 0-4' || github.event.schedule == '0 0 * * 1-5' || github.event.schedule == '0 1 * * 1-5') && 'news_prefetch' || 'full' }}
         run: python scan_worker.py
         # trigger re-register
