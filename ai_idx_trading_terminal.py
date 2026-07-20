@@ -3735,7 +3735,11 @@ def render_ai_signal_panel(df):
         bandar_akum = 0
         if "bandar" in df.columns:
             bandar_akum = df["bandar"].astype(str).str.contains("AKUMULASI").sum()
-        avg_score = df["score"].mean() if "score" in df.columns else 0
+        # BUGFIX: sebelumnya avg_score langsung df["score"].mean() -- kalau
+        # kolom "score" ada tapi isinya NaN semua, mean() balikin NaN dan
+        # bikin badge "Rata-rata Score" nampilin teks "nan". Sekarang
+        # di-fillna(0) dulu.
+        avg_score = df["score"].fillna(0).mean() if "score" in df.columns else 0
 
         # Mood
         if buy_count > sell_count * 1.2:
@@ -3751,7 +3755,24 @@ def render_ai_signal_panel(df):
             mood_class = "ai-mood-neutral"
             mood_icon = "⚪"
 
-        # Top 3 AI Picks: BUY + score tertinggi + trend bullish优先
+        # BUGFIX (PENYEBAB UTAMA "AI Signal tidak bekerja"): sort_values()
+        # di bawah ini pakai kolom "score" & "change_pct" TANPA dicek dulu
+        # apakah kolom itu memang ada di df -- beda dengan avg_score/
+        # bullish_trend/bandar_akum di atas yang semuanya sudah dijaga
+        # dengan "if col in df.columns". Begitu salah satu kolom itu
+        # hilang/berubah nama (mis. hasil scan_worker.py versi baru), baris
+        # ini lempar KeyError yang langsung ketangkep except di bawah, dan
+        # SELURUH panel gagal render -- cuma muncul warning generik
+        # "Gagal render AI Signal: ...". Sekarang kolom yang hilang di-isi
+        # 0 dulu sebelum sort, jadi panel tetap tampil walau datanya
+        # sebagian belum lengkap.
+        for _col in ("score", "change_pct"):
+            if _col not in df.columns:
+                df[_col] = 0
+        df["score"] = df["score"].fillna(0)
+        df["change_pct"] = df["change_pct"].fillna(0)
+
+        # Top 3 AI Picks: BUY + score tertinggi + trend bullish diprioritaskan
         picks_df = df[buy_mask].copy()
         if not picks_df.empty:
             picks_df = picks_df.sort_values(["score", "change_pct"], ascending=[False, False]).head(3)
@@ -3774,11 +3795,17 @@ def render_ai_signal_panel(df):
             ticker = _display_ticker(r["stock"]) if "stock" in r else str(r.get("stock","-"))
             score = r.get("score", 0)
             sig = r.get("signal","-")
-            price = r.get("price", 0)
+            price = r.get("price", 0) or 0
             trend = r.get("trend","-")
             bandar = r.get("bandar","-")
+            # BUGFIX: r.get("change_pct", 0) cuma fallback kalau key-nya gak
+            # ada -- kalau key-nya ADA tapi nilainya None/NaN, tetap lolos
+            # dan bikin f"{chg:+.2f}%" di bawah lempar ValueError (lagi-lagi
+            # menjatuhkan seluruh panel lewat except di paling bawah).
             chg = r.get("change_pct", 0)
-            chg_cls = "gain-up" if chg>=0 else "gain-down"
+            if chg is None or pd.isna(chg):
+                chg = 0
+            chg_cls = "gain-up" if chg >= 0 else "gain-down"
             picks_html_items += f"""
             <div class="ai-pick-card">
                 <div class="ai-pick-top"><span class="ai-pick-ticker">{ticker}</span><span class="ai-pick-score">{score}</span></div>
