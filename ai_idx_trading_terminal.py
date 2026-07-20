@@ -1577,6 +1577,61 @@ st.markdown("""
         margin: 0 0 12px 0;
         text-align: left;
     }
+
+    /* ================= AI SIGNAL PANEL (NEW) ================= */
+    .ai-signal-wrap {
+        background: linear-gradient(135deg, rgba(255,140,0,0.12), rgba(255,140,0,0.02));
+        border: 1px solid rgba(255,140,0,0.22);
+        border-radius: 22px;
+        padding: 18px 20px;
+        margin: 14px 0 22px 0;
+        box-shadow: 0 16px 32px -20px rgba(255,140,0,0.4);
+    }
+    .ai-signal-header {
+        display:flex; justify-content:space-between; align-items:center;
+        margin-bottom: 12px;
+    }
+    .ai-signal-title {
+        font-size:20px; font-weight:800; color:#fff; letter-spacing:0.3px;
+    }
+    .ai-signal-title span { color:#ff8c00; }
+    .ai-mood-badge {
+        padding:4px 12px; border-radius:20px; font-size:12px; font-weight:800;
+        text-transform:uppercase;
+    }
+    .ai-mood-bullish { background: rgba(34,197,94,0.15); color:#4ade80; border:1px solid rgba(34,197,94,0.3); }
+    .ai-mood-bearish { background: rgba(239,68,68,0.12); color:#f87171; border:1px solid rgba(239,68,68,0.3); }
+    .ai-mood-neutral { background: rgba(255,255,255,0.06); color:#a9a7c4; border:1px solid rgba(255,255,255,0.1); }
+    .ai-stats-row {
+        display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; margin-bottom:14px;
+    }
+    .ai-stat-card {
+        background: rgba(255,255,255,0.04);
+        border:1px solid rgba(255,255,255,0.07);
+        border-radius:14px; padding:10px 14px; text-align:center;
+    }
+    .ai-stat-val { font-size:20px; font-weight:800; color:#fff; line-height:1.2; }
+    .ai-stat-label { font-size:11px; color:#a9a7c4; margin-top:2px; }
+    .ai-picks-grid {
+        display:grid; grid-template-columns: repeat(3, 1fr); gap:10px;
+    }
+    .ai-pick-card {
+        background: rgba(255,255,255,0.05);
+        border:1px solid rgba(255,255,255,0.08);
+        border-radius:16px; padding:12px 14px;
+        transition: transform 0.15s;
+    }
+    .ai-pick-card:hover { transform: translateY(-2px); border-color: rgba(255,140,0,0.25); }
+    .ai-pick-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+    .ai-pick-ticker { font-size:15px; font-weight:800; color:#ff8c00; }
+    .ai-pick-score { font-size:11px; font-weight:700; padding:2px 8px; border-radius:12px; background:#ff8c00; color:#1a0f00; }
+    .ai-pick-mid { font-size:12px; color:#f3f2ef; margin-bottom:4px; display:flex; gap:6px; flex-wrap:wrap; }
+    .ai-pick-bot { font-size:11px; color:#a9a7c4; }
+    .ai-pick-link { color:#ff8a1f; text-decoration:none; font-weight:700; }
+    @media (max-width: 900px) {
+        .ai-stats-row, .ai-picks-grid { grid-template-columns: 1fr; }
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -3655,6 +3710,117 @@ if _stock_param:
 # walau fragment ini jalan tiap 15 menit di ribuan tab user bersamaan,
 # hampir semuanya cuma baca cache RAM (murah) -- cuma 1 dari mereka yang
 # kebetulan "kena" saat cache expired yang benar-benar fetch ke Supabase.
+
+def render_ai_signal_panel(df):
+    """Panel AI SIGNAL - ringkasan cerdas di atas Top Gainers/Losers.
+    Hitung dari df_scan (scan_engine scoring + bandar detection).
+    """
+    if df is None or df.empty:
+        st.markdown(
+            '<div class="ai-signal-wrap">'
+            '<div class="ai-signal-header"><div class="ai-signal-title">🤖 <span>AI SIGNAL</span> Hari Ini</div></div>'
+            '<div style="color:#a9a7c4;font-size:13px;">Data scan belum tersedia, tunggu update berikutnya.</div>'
+            '</div>', unsafe_allow_html=True)
+        return
+
+    # Hitung metrik
+    try:
+        total = len(df)
+        buy_mask = df["signal"].astype(str).str.contains("BUY")
+        sell_mask = df["signal"].astype(str).str.contains("SELL")
+        strong_buy = (df["signal"].astype(str).str.contains("STRONG BUY")).sum()
+        buy_count = buy_mask.sum()
+        sell_count = sell_mask.sum()
+        bullish_trend = (df["trend"].astype(str).str.contains("Bullish", na=False)).sum() if "trend" in df.columns else 0
+        bandar_akum = 0
+        if "bandar" in df.columns:
+            bandar_akum = df["bandar"].astype(str).str.contains("AKUMULASI").sum()
+        avg_score = df["score"].mean() if "score" in df.columns else 0
+
+        # Mood
+        if buy_count > sell_count * 1.2:
+            mood_label = f"BULLISH — {buy_count} BUY vs {sell_count} SELL"
+            mood_class = "ai-mood-bullish"
+            mood_icon = "🟢"
+        elif sell_count > buy_count * 1.2:
+            mood_label = f"BEARISH — {sell_count} SELL dominan"
+            mood_class = "ai-mood-bearish"
+            mood_icon = "🔴"
+        else:
+            mood_label = f"NEUTRAL — Market Choppy"
+            mood_class = "ai-mood-neutral"
+            mood_icon = "⚪"
+
+        # Top 3 AI Picks: BUY + score tertinggi + trend bullish优先
+        picks_df = df[buy_mask].copy()
+        if not picks_df.empty:
+            picks_df = picks_df.sort_values(["score", "change_pct"], ascending=[False, False]).head(3)
+        else:
+            picks_df = df.sort_values("score", ascending=False).head(3)
+
+        # Build HTML
+        # Stats
+        stats_html = f"""
+        <div class="ai-stats-row">
+            <div class="ai-stat-card"><div class="ai-stat-val">{buy_count}</div><div class="ai-stat-label">Sinyal BUY • {strong_buy} STRONG</div></div>
+            <div class="ai-stat-card"><div class="ai-stat-val">{bandar_akum}</div><div class="ai-stat-label">Bandar Akumulasi</div></div>
+            <div class="ai-stat-card"><div class="ai-stat-val">{avg_score:.0f}</div><div class="ai-stat-label">Rata-rata Score</div></div>
+        </div>
+        """
+
+        # Picks
+        picks_html_items = ""
+        for _, r in picks_df.iterrows():
+            ticker = _display_ticker(r["stock"]) if "stock" in r else str(r.get("stock","-"))
+            score = r.get("score", 0)
+            sig = r.get("signal","-")
+            price = r.get("price", 0)
+            trend = r.get("trend","-")
+            bandar = r.get("bandar","-")
+            chg = r.get("change_pct", 0)
+            chg_cls = "gain-up" if chg>=0 else "gain-down"
+            picks_html_items += f"""
+            <div class="ai-pick-card">
+                <div class="ai-pick-top"><span class="ai-pick-ticker">{ticker}</span><span class="ai-pick-score">{score}</span></div>
+                <div class="ai-pick-mid">
+                    <span class="badge badge-buy" style="font-size:10px;">{sig}</span>
+                    <span class="{chg_cls}" style="font-size:12px;">{chg:+.2f}%</span>
+                    <span style="font-size:11px;color:#d9d7ec;">{trend}</span>
+                </div>
+                <div class="ai-pick-bot">🏦 {bandar} • {format_harga(price)} • <a class="ai-pick-link" href="?stock={ticker}.JK" target="_self">Detail →</a></div>
+            </div>
+            """
+
+        # Risk check (optional)
+        risk_html = ""
+        if "climax_risk" in df.columns or "weak_close" in df.columns:
+            high_risk = 0
+            if "climax_risk" in df.columns:
+                high_risk += (df["climax_risk"]==True).sum() if hasattr(df["climax_risk"], "sum") else 0
+            if "weak_close" in df.columns:
+                high_risk += (df["weak_close"]==True).sum() if hasattr(df["weak_close"], "sum") else 0
+            if high_risk>0:
+                risk_html = f'<div style="margin-top:10px;font-size:11px;color:#fbbf24;">⚠️ {high_risk} saham terdeteksi climax/weak close — cek halaman Detail sebelum entry.</div>'
+
+        full_html = f"""
+        <div class="ai-signal-wrap">
+            <div class="ai-signal-header">
+                <div class="ai-signal-title">🤖 <span>AI SIGNAL</span> Hari Ini</div>
+                <span class="ai-mood-badge {mood_class}">{mood_icon} {mood_label}</span>
+            </div>
+            {stats_html}
+            <div style="font-size:12px;color:#a9a7c4;margin-bottom:8px;font-weight:600;">🔥 TOP 3 AI PICKS (Score + Bandar + Trend)</div>
+            <div class="ai-picks-grid">{picks_html_items}</div>
+            {risk_html}
+        </div>
+        """
+        st.markdown(full_html, unsafe_allow_html=True)
+
+    except Exception as e:
+        st.warning(f"Gagal render AI Signal: {e}")
+
+
+
 def _is_market_hours(now_dt):
     """Senin-Jumat, 09:00-16:15 (asumsi waktu server = WIB, konsisten
     dengan konvensi yang sudah dipakai di last_trading_date())."""
@@ -3702,9 +3868,13 @@ def render_top_panel():
         # ditumpuk di bawah nama app "Syariah Signal" (lihat
         # render_header_brand_block()), jadi tidak dirender dobel di sini.
 
+
     df_scan_preview = st.session_state.scan_df
     if df_scan_preview is not None and not df_scan_preview.empty:
+        # --- NEW: AI SIGNAL PANEL ---
+        render_ai_signal_panel(df_scan_preview)
         ranked = df_scan_preview.sort_values("change_pct", ascending=False)
+
         # PERBAIKAN: tampung sampai 50 saham per panel (bukan cuma 3), tapi
         # dibungkus container scroll biar tinggi UI tetap cuma ~5 baris kelihatan.
         gainers = ranked.head(50)
